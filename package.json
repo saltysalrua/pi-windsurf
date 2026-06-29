@@ -27,5 +27,8 @@
     "*.ts",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "devDependencies": {
+    "@types/node": "^26.0.1"
+  }
 }

@@ -12,7 +12,8 @@ import { startProxy, stopProxy, PROXY_SECRET, setProxyCredentials } from "./prox
 import { loadCredentials, saveCredentials, deleteCredentials, DEFAULT_REGION, runLoginLoopback, registerUser, type PersistedCredentials } from "./oauth";
 import { clearCachedUserJwt } from "./auth";
 import { clearSessionIds } from "./chat";
-import { clearCachedCatalog, getCachedCatalog, type ModelCatalogEntry } from "./catalog";
+import { clearCachedCatalog, getCachedCatalog, type ModelCatalogEntry, type ModelFeatures } from "./catalog";
+import { getUserStatus, clearAssignmentCache, type UserStatus } from "./assign";
 
 let _pi: ExtensionAPI | null = null;
 
@@ -20,18 +21,20 @@ let _pi: ExtensionAPI | null = null;
 function catalogModelToPi(m: ModelCatalogEntry) {
   const ctx = m.contextWindow ?? 0;
   const maxOut = m.maxOutputTokens ?? 0;
-  const isFree = !m.hasPricing; // no pricing info = free on this plan
+  const isFree = !m.hasPricing;
   const tags: string[] = [];
   if (isFree) tags.push("Free");
   if (m.promoActive) tags.push(m.promoLabel || "Promo");
   if (m.isNew) tags.push("New");
+  if (m.isModelRouter) tags.push("Router");
   const tagStr = tags.length > 0 ? ` [${tags.join(" ")}]` : "";
   const ctxStr = ctx > 0 ? ` (${ctx >= 1_000_000 ? `${Math.round(ctx / 1_000_000)}M` : `${Math.round(ctx / 1_000)}K`})` : "";
+  const f = m.features;
   return {
     id: m.modelUid,
     name: `${m.label}${tagStr}${ctxStr}`,
-    reasoning: true,
-    input: ["text", "image"] as ("text" | "image")[],
+    reasoning: f?.supportsThinking ?? true,
+    input: ["text", ...(f?.supportsImageCaptions !== false ? ["image"] : [])] as ("text" | "image")[],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: ctx || 1,
     maxTokens: maxOut || 1,
@@ -123,10 +126,30 @@ export default async function (pi: ExtensionAPI) {
   console.error(hasCreds ? `[windsurf] connected — ${models.length} models` : `[windsurf] /login windsurf to connect`);
 
   pi.registerCommand("windsurf-status", {
-    description: "Show Windsurf auth status",
+    description: "Show Windsurf auth status, plan, and quota",
     handler: async (_args, ctx) => {
       const c = loadCredentials();
-      ctx.ui.notify(c ? `Windsurf: authenticated (${c.apiServerUrl})` : "Windsurf: not signed in. /login windsurf", c ? "info" : "warning");
+      if (!c) {
+        ctx.ui.notify("Windsurf: not signed in. /login windsurf", "warning");
+        return;
+      }
+      try {
+        const status = await getUserStatus(c.apiKey, c.apiServerUrl);
+        const parts: string[] = [];
+        parts.push(status.planName ? `Plan: ${status.planName}` : "Plan: unknown");
+        if (status.isPro) parts.push("Pro");
+        if (status.isTeams) parts.push("Teams");
+        if (status.isEnterprise) parts.push("Enterprise");
+        if (status.availablePromptCredits !== undefined) parts.push(`Credits: ${status.availablePromptCredits}/${status.monthlyPromptCredits ?? "?"} prompts`);
+        if (status.availableFlowCredits !== undefined) parts.push(`Flow: ${status.availableFlowCredits}/${status.monthlyFlowCredits ?? "?"}`);
+        if (status.dailyQuotaRemainingPercent !== undefined) parts.push(`Daily: ${status.dailyQuotaRemainingPercent}%`);
+        if (status.weeklyQuotaRemainingPercent !== undefined) parts.push(`Weekly: ${status.weeklyQuotaRemainingPercent}%`);
+        if (status.canUseCascade === false) parts.push("Cascade: disabled");
+        if (status.canUseCli === false) parts.push("CLI: disabled");
+        ctx.ui.notify(`Windsurf: ${parts.join(" | ")}`, "info");
+      } catch (e) {
+        ctx.ui.notify(`Windsurf: authenticated (${c.apiServerUrl}) but status fetch failed: ${e instanceof Error ? e.message : String(e)}`, "warning");
+      }
     },
   });
 
@@ -135,7 +158,7 @@ export default async function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       const ok = deleteCredentials();
       setProxyCredentials(null);
-      clearCachedUserJwt(); clearSessionIds(); clearCachedCatalog();
+      clearCachedUserJwt(); clearSessionIds(); clearCachedCatalog(); clearAssignmentCache();
       ctx.ui.notify(ok ? "Windsurf: signed out." : "Already signed out.", "info");
     },
   });

@@ -13,6 +13,8 @@ import {
 } from "./wire";
 import { buildMetadata } from "./metadata";
 import { getCachedUserJwt } from "./auth";
+import { resolveModel, clearAssignmentCache } from "./assign";
+import type { InferenceConfig } from "./catalog";
 
 // ----------------------------------------------------------------------------
 // Types
@@ -51,6 +53,8 @@ export interface CloudChatRequest {
   apiKey: string;
   apiServerUrl?: string;
   modelUid: string;
+  isModelRouter?: boolean;
+  inferenceConfig?: InferenceConfig;
   messages: ChatHistoryItem[];
   tools?: ToolDef[];
   cascadeId?: string;
@@ -101,7 +105,7 @@ function getOrAllocateSessionIds(apiKey: string, host: string, cascadeIdOverride
   return ids;
 }
 
-export function clearSessionIds(): void { sessionCache.clear(); }
+export function clearSessionIds(): void { sessionCache.clear(); clearAssignmentCache(); }
 
 // ----------------------------------------------------------------------------
 // Content normalization
@@ -211,13 +215,13 @@ const SOURCE_BY_ROLE: Record<string, number> = { user: 1, assistant: 2, system: 
 
 function encodeCompletionConfiguration(opts: {
   maxOutputTokens?: number; maxInputTokens?: number; temperature?: number; topK?: number; topP?: number;
-}): Buffer {
+}, inferenceConfig?: InferenceConfig): Buffer {
   const enc64 = (fieldNum: number, n: number): Buffer => {
     const b = Buffer.alloc(8);
     b.writeDoubleLE(n, 0);
     return Buffer.concat([Buffer.from([(fieldNum << 3) | 1]), b]);
   };
-  return Buffer.concat([
+  const parts: Buffer[] = [
     encodeVarintField(1, 1),
     encodeVarintField(2, opts.maxInputTokens ?? 64000),
     encodeVarintField(3, opts.maxOutputTokens ?? 128_000),
@@ -226,20 +230,55 @@ function encodeCompletionConfiguration(opts: {
     encodeVarintField(7, opts.topK ?? 50),
     enc64(8, 1.0),
     enc64(11, 1.0),
-  ]);
+  ];
+
+  // Encode per-provider InferenceConfig as a sub-message on field 9
+  if (inferenceConfig && inferenceConfig.kind !== "none") {
+    parts.push(encodeMessage(9, encodeInferenceConfigBody(inferenceConfig)));
+  }
+
+  return Buffer.concat(parts);
+}
+
+function encodeInferenceConfigBody(cfg: InferenceConfig): Buffer {
+  if (cfg.kind === "anthropic") {
+    const sub: Buffer[] = [];
+    if (cfg.effort) sub.push(encodeString(1, cfg.effort));
+    if (cfg.thinking) sub.push(encodeString(2, cfg.thinking));
+    if (cfg.fastMode !== undefined) sub.push(encodeVarintField(3, cfg.fastMode ? 1 : 0));
+    if (cfg.context1m !== undefined) sub.push(encodeVarintField(4, cfg.context1m ? 1 : 0));
+    // Anthropic is oneof field 1 in InferenceConfig
+    return encodeMessage(1, Buffer.concat(sub));
+  }
+  if (cfg.kind === "google") {
+    const sub: Buffer[] = [];
+    if (cfg.reasoningEffort) sub.push(encodeString(1, cfg.reasoningEffort));
+    if (cfg.reasoningContext) sub.push(encodeString(2, cfg.reasoningContext));
+    // Google is oneof field 2 in InferenceConfig
+    return encodeMessage(2, Buffer.concat(sub));
+  }
+  if (cfg.kind === "openai") {
+    const sub: Buffer[] = [];
+    if (cfg.extendedPromptCacheRetention !== undefined) sub.push(encodeVarintField(1, cfg.extendedPromptCacheRetention));
+    if (cfg.serviceTier) sub.push(encodeString(2, cfg.serviceTier));
+    // OpenAi is oneof field 3 in InferenceConfig
+    return encodeMessage(3, Buffer.concat(sub));
+  }
+  return Buffer.alloc(0);
 }
 
 interface BuildArgs {
-  apiKey: string; userJwt: string; modelUid: string; messages: ChatHistoryItem[];
+  apiKey: string; userJwt: string; assignmentJwt?: string; modelUid: string; messages: ChatHistoryItem[];
   cascadeId: string; promptId: string; sessionId: string; requestId: bigint; triggerId: string;
   tools?: ToolDef[]; requestType?: number;
   completionOpts?: { maxOutputTokens?: number; maxInputTokens?: number; temperature?: number; topK?: number; topP?: number; };
+  inferenceConfig?: InferenceConfig;
 }
 
 function buildGetChatMessageRequest(args: BuildArgs): Buffer {
   const metadata = buildMetadata({
-    apiKey: args.apiKey, userJwt: args.userJwt, sessionId: args.sessionId,
-    requestId: args.requestId, triggerId: args.triggerId,
+    apiKey: args.apiKey, userJwt: args.userJwt, assignmentJwt: args.assignmentJwt,
+    sessionId: args.sessionId, requestId: args.requestId, triggerId: args.triggerId,
   });
   const collapsed = collapseSystemIntoUser(args.messages);
   const promptParts = collapsed.map((m) =>
@@ -249,7 +288,7 @@ function buildGetChatMessageRequest(args: BuildArgs): Buffer {
       { toolCallId: m.role === "tool" ? m.tool_call_id : undefined, toolCalls: m.role === "assistant" ? m.tool_calls : undefined },
     )),
   );
-  const completion = encodeCompletionConfiguration(args.completionOpts ?? {});
+  const completion = encodeCompletionConfiguration(args.completionOpts ?? {}, args.inferenceConfig);
   const toolParts: Buffer[] = (args.tools ?? []).map((t) => encodeMessage(10, encodeToolDef(t)));
   return Buffer.concat([
     encodeMessage(1, metadata),
@@ -346,15 +385,21 @@ function decodeUsageBlock(buf: Buffer): CloudChatEvent | null {
 const TRACE_ID_RE = /\(trace ID: ([0-9a-f]+)\)/i;
 
 export async function* streamChatEvents(req: CloudChatRequest): AsyncGenerator<CloudChatEvent> {
-  const host = req.apiServerUrl.replace(/\/$/, "");
+  const host = (req.apiServerUrl ?? "https://server.self-serve.windsurf.com").replace(/\/$/, "");
   const userJwt = await getCachedUserJwt(req.apiKey, host, req.signal);
   const sessionIds = getOrAllocateSessionIds(req.apiKey, host, req.cascadeId);
 
+  // Resolve model router to concrete model + assignment_jwt
+  const { modelUid: resolvedUid, assignmentJwt } = await resolveModel(
+    req.apiKey, host, req.modelUid, req.isModelRouter ?? false, req.signal,
+  );
+
   const proto = buildGetChatMessageRequest({
-    apiKey: req.apiKey, userJwt, modelUid: req.modelUid, messages: req.messages,
+    apiKey: req.apiKey, userJwt, assignmentJwt, modelUid: resolvedUid, messages: req.messages,
     tools: req.tools, cascadeId: sessionIds.cascadeId, promptId: crypto.randomUUID(),
     sessionId: sessionIds.sessionId, requestId: BigInt(Date.now()), triggerId: crypto.randomUUID(),
     requestType: req.requestType, completionOpts: req.completionOpts,
+    inferenceConfig: req.inferenceConfig,
   });
   const body = frameConnectStream(proto, true);
 

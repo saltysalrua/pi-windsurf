@@ -8,6 +8,7 @@ const WINDSURF_VERSION_STRING = "2.0.0";
 export interface MetadataInput {
   apiKey: string;
   userJwt?: string;
+  assignmentJwt?: string;
   sessionId: string;
   requestId: bigint;
   triggerId: string;
@@ -43,5 +44,6 @@ export function buildMetadata(input: MetadataInput): Buffer {
     encodeString(28, "windsurf"),
   ];
   if (input.userJwt) parts.push(encodeString(21, input.userJwt));
+  if (input.assignmentJwt) parts.push(encodeString(22, input.assignmentJwt));
   return Buffer.concat(parts);
 }

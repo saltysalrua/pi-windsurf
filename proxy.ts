@@ -10,6 +10,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { streamChatEvents, CloudChatError, type ChatHistoryItem, type ToolDef } from "./chat";
 import { resolveModelOrPassthrough, getDefaultModel, getCanonicalModels } from "./models";
 import { loadCredentials } from "./oauth";
+import { getCachedCatalog, type InferenceConfig } from "./catalog";
 
 const WINDSURF_PROXY_HOST = "127.0.0.1";
 const WINDSURF_PROXY_PORT = 42100;
@@ -61,6 +62,18 @@ function extractVariantFromProviderOptions(providerOptions: Record<string, unkno
   const windsurf = windsurfRaw && typeof windsurfRaw === "object" ? (windsurfRaw as Record<string, unknown>) : undefined;
   const pickString = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
   return pickString(windsurf?.["variant"]) ?? pickString(windsurf?.["variantID"]) ?? pickString(windsurf?.["variantId"]) ?? pickString(providerOptions["variant"]) ?? pickString(providerOptions["variantID"]) ?? pickString(providerOptions["variantId"]);
+}
+
+/** Look up catalog entry for a model UID to get isModelRouter + inferenceConfig. */
+async function lookupCatalogMeta(apiKey: string, apiServerUrl: string, modelUid: string): Promise<{ isModelRouter?: boolean; inferenceConfig?: InferenceConfig }> {
+  try {
+    const catalog = await getCachedCatalog(apiKey, apiServerUrl);
+    if (catalog) {
+      const entry = catalog.byUid.get(modelUid);
+      if (entry) return { isModelRouter: entry.isModelRouter, inferenceConfig: entry.inferenceConfig };
+    }
+  } catch {}
+  return {};
 }
 
 function openAIError(status: number, message: string, details?: string): object {
@@ -174,6 +187,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       const requestedMaxTokens = typeof requestBody.max_tokens === "number" && requestBody.max_tokens > 0 ? requestBody.max_tokens : 128_000;
       const isStreaming = requestBody.stream !== false;
 
+      const catalogMeta = await lookupCatalogMeta(creds.apiKey, creds.apiServerUrl, resolved.modelUid);
+
       if (isStreaming) {
         // SSE streaming response
         res.writeHead(200, {
@@ -198,6 +213,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
             apiKey: creds.apiKey,
             apiServerUrl: creds.apiServerUrl,
             modelUid: resolved.modelUid,
+            isModelRouter: catalogMeta.isModelRouter,
+            inferenceConfig: catalogMeta.inferenceConfig,
             messages: multimodalMessages,
             tools: tools.length > 0 ? tools : undefined,
             signal: abort.signal,
@@ -269,6 +286,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           apiKey: creds.apiKey,
           apiServerUrl: creds.apiServerUrl,
           modelUid: resolved.modelUid,
+          isModelRouter: catalogMeta.isModelRouter,
+          inferenceConfig: catalogMeta.inferenceConfig,
           messages: multimodalMessages,
           tools: tools.length > 0 ? tools : undefined,
           completionOpts: { maxOutputTokens: requestedMaxTokens },
