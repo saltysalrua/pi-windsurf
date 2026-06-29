@@ -277,6 +277,7 @@ interface BuildArgs {
   tools?: ToolDef[]; requestType?: number;
   completionOpts?: { maxOutputTokens?: number; maxInputTokens?: number; temperature?: number; topK?: number; topP?: number; };
   inferenceConfig?: InferenceConfig;
+  systemPrefixLen?: number;
 }
 
 function buildGetChatMessageRequest(args: BuildArgs): Buffer {
@@ -284,7 +285,7 @@ function buildGetChatMessageRequest(args: BuildArgs): Buffer {
     apiKey: args.apiKey, userJwt: args.userJwt, assignmentJwt: args.assignmentJwt,
     sessionId: args.sessionId, requestId: args.requestId, triggerId: args.triggerId,
   });
-  const { messages: separated } = separateSystemMessages(args.messages);
+  const { messages: separated, systemPrefixLen } = separateSystemMessages(args.messages);
   const promptParts = separated.map((m) =>
     encodeMessage(3, encodeChatMessagePrompt(
       normalizeContent(m.content),
@@ -303,6 +304,7 @@ function buildGetChatMessageRequest(args: BuildArgs): Buffer {
     encodeString(16, args.cascadeId),
     encodeString(21, args.modelUid),
     encodeString(22, args.promptId),
+    ...(systemPrefixLen > 0 ? [encodeVarintField(11, systemPrefixLen)] : []),
   ]);
 }
 
