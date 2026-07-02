@@ -190,6 +190,14 @@ export default async function (pi: ExtensionAPI) {
     }
   });
 
+  // Show thinking level in status bar when it changes
+  pi.on("thinking_level_select", async (event, ctx) => {
+    if (ctx.model?.provider === "windsurf") {
+      const level = event.level;
+      ctx.ui.setStatus("windsurf", `${ctx.model?.id ?? "?"} · ${level}`);
+    }
+  });
+
   // Show thinking status during requests, clear on completion
   pi.on("before_provider_request", async (_event, ctx) => {
     if (ctx.model?.provider === "windsurf") {
