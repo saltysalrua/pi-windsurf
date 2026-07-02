@@ -7,15 +7,17 @@
  * Usage: /login windsurf → /model windsurf/<id>
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { OAuthCredentials, OAuthLoginCallbacks, ThinkingLevel, ModelThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
+import type { OAuthCredentials, OAuthLoginCallbacks, ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { startProxy, stopProxy, PROXY_SECRET, setProxyCredentials, getResponseMeta, serializeResponseMeta } from "./proxy";
 import { loadCredentials, saveCredentials, deleteCredentials, DEFAULT_REGION, runLoginLoopback, registerUser, type PersistedCredentials } from "./oauth";
 import { clearCachedUserJwt } from "./auth";
 import { clearSessionIds } from "./chat";
 import { clearCachedCatalog, getCachedCatalog, type ModelCatalogEntry, type ModelFeatures } from "./catalog";
-import { getUserStatus, clearAssignmentCache, type UserStatus } from "./assign";
+import { getUserStatus, clearAssignmentCache } from "./assign";
 
 let _pi: ExtensionAPI | null = null;
+let _apiKey = "";
+let _apiServerUrl = "https://server.self-serve.windsurf.com";
 
 
 
@@ -128,21 +130,19 @@ export default async function (pi: ExtensionAPI) {
   const baseUrl = `http://127.0.0.1:${proxyPort}/v1`;
 
   let hasCreds = false;
-  let apiKey = "";
-  let apiServerUrl = "https://server.self-serve.windsurf.com";
   try {
     const stored = loadCredentials();
     if (stored) {
       setProxyCredentials({ apiKey: stored.apiKey, apiServerUrl: stored.apiServerUrl });
       hasCreds = true;
-      apiKey = stored.apiKey;
-      apiServerUrl = stored.apiServerUrl;
+      _apiKey = stored.apiKey;
+      _apiServerUrl = stored.apiServerUrl;
     }
   } catch {}
 
   // Fetch models dynamically from catalog
   const models = hasCreds
-    ? await fetchDynamicModels(apiKey, apiServerUrl)
+    ? await fetchDynamicModels(_apiKey, _apiServerUrl)
     : [];
 
   pi.registerProvider("windsurf", {
@@ -234,30 +234,81 @@ export default async function (pi: ExtensionAPI) {
     },
   });
 
+  // -- appendEntry: persist Windsurf status in session (no LLM context pollution) --
+  let _lastStatusEntry: Record<string, unknown> | null = null;
+
+  async function refreshAndPersistStatus(): Promise<void> {
+    const c = loadCredentials();
+    if (!c) return;
+    try {
+      const status = await getUserStatus(c.apiKey, c.apiServerUrl);
+      _lastStatusEntry = {
+        planName: status.planName,
+        availablePromptCredits: status.availablePromptCredits,
+        monthlyPromptCredits: status.monthlyPromptCredits,
+        dailyQuotaRemainingPercent: status.dailyQuotaRemainingPercent,
+        availableFlowCredits: status.availableFlowCredits,
+        monthlyFlowCredits: status.monthlyFlowCredits,
+        weeklyQuotaRemainingPercent: status.weeklyQuotaRemainingPercent,
+      };
+      pi.appendEntry("windsurf-status", _lastStatusEntry);
+      pi.events.emit("windsurf:status", _lastStatusEntry);
+    } catch {}
+  }
+
   pi.on("session_start", async (event, ctx) => {
-    if (event.reason === "resume" || event.reason === "reload") {
+    if (event.reason === "resume" || event.reason === "reload" || event.reason === "new" || event.reason === "fork") {
       const c = loadCredentials();
       if (c) {
         setProxyCredentials({ apiKey: c.apiKey, apiServerUrl: c.apiServerUrl });
-        apiKey = c.apiKey;
-        apiServerUrl = c.apiServerUrl;
+        _apiKey = c.apiKey;
+        _apiServerUrl = c.apiServerUrl;
+        // Restore persisted status from session entries
+        for (const entry of ctx.sessionManager.getEntries()) {
+          if (entry.type === "custom" && entry.customType === "windsurf-status") {
+            _lastStatusEntry = entry.data as Record<string, unknown>;
+          }
+        }
+        // Fetch fresh status in background
+        refreshAndPersistStatus();
       }
     }
   });
 
-  // Show resolved model info in the status bar
+  // -- entryRenderer: Windsurf status card in chat transcript --
+  pi.registerEntryRenderer("windsurf-status", (entry, { expanded }, theme) => {
+    const d = entry.data as Record<string, unknown> | undefined;
+    if (!d) return { render: () => [], invalidate: () => {} };
+    const lines: string[] = [];
+    const plan = d.planName ? String(d.planName) : "unknown";
+    const credits = d.availablePromptCredits !== undefined && d.monthlyPromptCredits !== undefined
+      ? `Credits: ${d.availablePromptCredits}/${d.monthlyPromptCredits}`
+      : "";
+    const daily = d.dailyQuotaRemainingPercent !== undefined ? `Daily: ${d.dailyQuotaRemainingPercent}%` : "";
+    lines.push(theme.fg("accent", `Windsurf`) + theme.fg("dim", ` ${plan}`) + (credits ? ` ${theme.fg("muted", credits)}` : "") + (daily ? ` ${theme.fg("muted", daily)}` : ""));
+    if (expanded) {
+      const flow = d.availableFlowCredits !== undefined && d.monthlyFlowCredits !== undefined ? `Flow: ${d.availableFlowCredits}/${d.monthlyFlowCredits}` : "";
+      const weekly = d.weeklyQuotaRemainingPercent !== undefined ? `Weekly: ${d.weeklyQuotaRemainingPercent}%` : "";
+      if (flow || weekly) lines.push(theme.fg("dim", `  ${flow}${flow && weekly ? "  " : ""}${weekly}`));
+    }
+    return { render: () => lines, invalidate: () => {} };
+  });
+
+  // -- show resolved model info in the status bar + emit event --
   pi.on("model_select", async (event, ctx) => {
     const m = event.model;
     if (m?.id && m.provider === "windsurf") {
       ctx.ui.setStatus("windsurf", m.id);
+      pi.events.emit("windsurf:model_select", { modelId: m.id });
     }
   });
 
-  // Show thinking level in status bar when it changes
+  // -- show thinking level in status bar + emit event --
   pi.on("thinking_level_select", async (event, ctx) => {
     if (ctx.model?.provider === "windsurf") {
       const level = event.level;
       ctx.ui.setStatus("windsurf", `${ctx.model?.id ?? "?"} · ${level}`);
+      pi.events.emit("windsurf:thinking_level", { level, modelId: ctx.model?.id });
     }
   });
 
@@ -271,11 +322,22 @@ export default async function (pi: ExtensionAPI) {
   });
 
   pi.on("after_provider_response", async (event, ctx) => {
-    if (ctx.model?.provider === "windsurf") {
-      ctx.ui.setWorkingMessage();
-      if (event.status < 200 || event.status >= 300) {
-        ctx.ui.notify(`Windsurf error: HTTP ${event.status}`, "error");
-      }
+    if (ctx.model?.provider !== "windsurf") return;
+    ctx.ui.setWorkingMessage();
+    if (event.status === 429) {
+      const retryAfter = event.headers?.["retry-after"];
+      ctx.ui.notify(`Windsurf rate limited. Retry after ${retryAfter ?? "?"}s`, "warning");
+      pi.events.emit("windsurf:error", { type: "rate_limit", status: 429, retryAfter });
+      pi.sendMessage({
+        customType: "windsurf-context",
+        content: `Windsurf API returned 429 rate limit. ${retryAfter ? `Retry after ${retryAfter}s.` : "Wait before retrying."} Reduce request frequency or switch to a different model.`,
+        display: false,
+      }, { deliverAs: "followUp" });
+    } else if (event.status >= 500) {
+      ctx.ui.notify(`Windsurf server error: ${event.status}`, "error");
+      pi.events.emit("windsurf:error", { type: "server_error", status: event.status });
+    } else if (event.status >= 400) {
+      pi.events.emit("windsurf:error", { type: "client_error", status: event.status });
     }
   });
 
@@ -299,6 +361,7 @@ export default async function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event, ctx) => {
     ctx.ui.setStatus("windsurf", undefined);
     _pi = null;
+    _lastStatusEntry = null;
     stopProxy();
   });
 }
