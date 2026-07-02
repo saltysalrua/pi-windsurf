@@ -294,6 +294,28 @@ export default async function (pi: ExtensionAPI) {
     return { render: () => lines, invalidate: () => {} };
   });
 
+  // -- messageRenderer: Windsurf context messages in chat transcript --
+  pi.registerMessageRenderer("windsurf-context", (message, { expanded }, theme) => {
+    const content = message.content || "";
+    const details = (message as any).details as Record<string, unknown> | undefined;
+    const isRateLimit = content.includes("429") || content.includes("rate limit");
+    const isServerError = content.includes("500") || content.includes("server error");
+    const lines: string[] = [];
+    if (isRateLimit) {
+      const retryAfter = details?.retryAfter ? String(details.retryAfter) : null;
+      lines.push(theme.fg("warning", "[rate limit]") + " " + theme.fg("dim", content));
+      if (expanded && retryAfter) {
+        lines.push(theme.fg("dim", `  Retry after: ${retryAfter}s`));
+        lines.push(theme.fg("dim", `  Suggestion: switch model or wait`));
+      }
+    } else if (isServerError) {
+      lines.push(theme.fg("error", "[server error]") + " " + theme.fg("dim", content));
+    } else {
+      lines.push(theme.fg("muted", "[windsurf]") + " " + theme.fg("dim", content));
+    }
+    return { render: () => lines, invalidate: () => {} };
+  });
+
   // -- show resolved model info in the status bar + emit event --
   pi.on("model_select", async (event, ctx) => {
     const m = event.model;
@@ -332,6 +354,7 @@ export default async function (pi: ExtensionAPI) {
         customType: "windsurf-context",
         content: `Windsurf API returned 429 rate limit. ${retryAfter ? `Retry after ${retryAfter}s.` : "Wait before retrying."} Reduce request frequency or switch to a different model.`,
         display: false,
+        details: { type: "rate_limit", status: 429, retryAfter: retryAfter ?? null, model: ctx.model?.id ?? null },
       }, { deliverAs: "followUp" });
     } else if (event.status >= 500) {
       ctx.ui.notify(`Windsurf server error: ${event.status}`, "error");
