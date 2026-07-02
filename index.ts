@@ -7,7 +7,7 @@
  * Usage: /login windsurf → /model windsurf/<id>
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { OAuthCredentials, OAuthLoginCallbacks, ThinkingLevelMap } from "@earendil-works/pi-ai";
+import type { OAuthCredentials, OAuthLoginCallbacks, ThinkingLevel, ModelThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { startProxy, stopProxy, PROXY_SECRET, setProxyCredentials } from "./proxy";
 import { loadCredentials, saveCredentials, deleteCredentials, DEFAULT_REGION, runLoginLoopback, registerUser, type PersistedCredentials } from "./oauth";
 import { clearCachedUserJwt } from "./auth";
@@ -19,8 +19,7 @@ let _pi: ExtensionAPI | null = null;
 
 
 
-/** Pi's native thinking levels — imported from @earendil-works/pi-ai. */
-import type { ThinkingLevel, ModelThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
+
 
 /** Build thinkingLevelMap from catalog label by finding which level word it contains. */
 function buildThinkingLevelMap(label: string, familySize: number): ThinkingLevelMap | undefined {
@@ -150,11 +149,25 @@ export default async function (pi: ExtensionAPI) {
     name: "Cognition (Windsurf)",
     baseUrl, apiKey: PROXY_SECRET, api: "openai-completions", authHeader: true,
     models,
+    compat: {
+      supportsDeveloperRole: false,       // proxy uses "system" role, not "developer"
+      supportsReasoningEffort: false,     // Windsurf doesn't use OpenAI's reasoning_effort param
+      maxTokensField: "max_tokens",      // standard OpenAI field
+      requiresToolResultName: false,      // proxy handles tool result formatting
+      supportsUsageInStreaming: true,     // proxy sends usage in stream
+    },
     oauth: {
       name: "Windsurf (Cognition)",
       login: loginWindsurf,
       refreshToken: refreshWindsurfToken,
       getApiKey: (creds: OAuthCredentials) => creds.access,
+      modifyModels: (models, creds) => {
+        // Filter models based on user's plan tier
+        const c = loadCredentials();
+        if (!c) return models;
+        // All catalog models are already filtered by GetCliModelConfigs
+        return models;
+      },
     },
   });
 
@@ -194,6 +207,7 @@ export default async function (pi: ExtensionAPI) {
       const ok = deleteCredentials();
       setProxyCredentials(null);
       clearCachedUserJwt(); clearSessionIds(); clearCachedCatalog(); clearAssignmentCache();
+      pi.unregisterProvider("windsurf");
       ctx.ui.notify(ok ? "Windsurf: signed out." : "Already signed out.", "info");
     },
   });
@@ -220,6 +234,17 @@ export default async function (pi: ExtensionAPI) {
     },
   });
 
+  pi.on("session_start", async (event, ctx) => {
+    if (event.reason === "resume" || event.reason === "reload") {
+      const c = loadCredentials();
+      if (c) {
+        setProxyCredentials({ apiKey: c.apiKey, apiServerUrl: c.apiServerUrl });
+        apiKey = c.apiKey;
+        apiServerUrl = c.apiServerUrl;
+      }
+    }
+  });
+
   // Show resolved model info in the status bar
   pi.on("model_select", async (event, ctx) => {
     const m = event.model;
@@ -239,7 +264,9 @@ export default async function (pi: ExtensionAPI) {
   // Show thinking status during requests, clear on completion
   pi.on("before_provider_request", async (_event, ctx) => {
     if (ctx.model?.provider === "windsurf") {
-      ctx.ui.setWorkingMessage(`windsurf ${ctx.model.id} ...`);
+      const usage = ctx.getContextUsage();
+      const tokens = usage ? `${Math.round(usage.tokens / 1000)}K` : "";
+      ctx.ui.setWorkingMessage(`windsurf ${ctx.model.id}${tokens ? ` (${tokens})` : ""} ...`);
     }
   });
 
