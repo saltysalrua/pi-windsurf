@@ -216,6 +216,17 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
       const catalogMeta = await lookupCatalogMeta(creds.apiKey, creds.apiServerUrl, resolved.modelUid);
 
+      // Strip image parts if model doesn't support images
+      const catalogEntry = (await getCachedCatalog(creds.apiKey, creds.apiServerUrl))?.byUid.get(resolved.modelUid);
+      const modelSupportsImages = catalogEntry?.features?.supportsImageCaptions !== false;
+      if (!modelSupportsImages) {
+        for (const m of multimodalMessages) {
+          if (Array.isArray(m.content)) {
+            m.content = m.content.filter(p => p.type !== "image");
+          }
+        }
+      }
+
       if (isStreaming) {
         // SSE streaming response
         res.writeHead(200, {
