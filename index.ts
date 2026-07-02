@@ -146,29 +146,38 @@ export default async function (pi: ExtensionAPI) {
     ? await fetchDynamicModels(_apiKey, _apiServerUrl)
     : [];
 
+  // Register OpenAI-compatible provider (Pi sends OpenAI format -> /v1/chat/completions)
   pi.registerProvider("windsurf", {
     name: "Cognition (Windsurf)",
     baseUrl, apiKey: PROXY_SECRET, api: "openai-completions", authHeader: true,
     models,
     compat: {
-      supportsDeveloperRole: false,       // proxy uses "system" role, not "developer"
-      supportsReasoningEffort: false,     // Windsurf doesn't use OpenAI's reasoning_effort param
-      maxTokensField: "max_tokens",      // standard OpenAI field
-      requiresToolResultName: false,      // proxy handles tool result formatting
-      supportsUsageInStreaming: true,     // proxy sends usage in stream
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      maxTokensField: "max_tokens",
+      requiresToolResultName: false,
+      supportsUsageInStreaming: true,
     },
     oauth: {
       name: "Windsurf (Cognition)",
       login: loginWindsurf,
       refreshToken: refreshWindsurfToken,
       getApiKey: (creds: OAuthCredentials) => creds.access,
-      modifyModels: (models, creds) => {
-        // Filter models based on user's plan tier
-        const c = loadCredentials();
-        if (!c) return models;
-        // All catalog models are already filtered by GetCliModelConfigs
-        return models;
-      },
+      modifyModels: (models) => models,
+    },
+  });
+
+  // Register Anthropic Messages provider (Pi sends Anthropic format -> /v1/messages)
+  pi.registerProvider("windsurf-anthropic", {
+    name: "Cognition (Windsurf Anthropic)",
+    baseUrl, apiKey: PROXY_SECRET, api: "anthropic-messages", authHeader: true,
+    models,
+    compat: {
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      maxTokensField: "max_tokens",
+      requiresToolResultName: false,
+      supportsUsageInStreaming: true,
     },
   });
 
@@ -209,6 +218,7 @@ export default async function (pi: ExtensionAPI) {
       setProxyCredentials(null);
       clearCachedUserJwt(); clearSessionIds(); clearCachedCatalog(); clearAssignmentCache();
       pi.unregisterProvider("windsurf");
+      pi.unregisterProvider("windsurf-anthropic");
       ctx.ui.notify(ok ? "Windsurf: signed out." : "Already signed out.", "info");
     },
   });
