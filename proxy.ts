@@ -200,8 +200,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
       const requestedModel = requestBody.model || getDefaultModel();
       const variantOverride = extractVariantFromProviderOptions(requestBody.providerOptions);
-      // Resolve the base model name without variant suffix — catalog UIDs don't include variant
-      const resolved = await resolveModelName(requestedModel, creds.apiKey, creds.apiServerUrl);
+      // Resolve model: base name → UID, then apply thinking variant if provided
+      const resolved = await resolveModelName(requestedModel, creds.apiKey, creds.apiServerUrl, variantOverride);
 
 
       const tools: ToolDef[] = (requestBody.tools ?? []).map(t => ({
