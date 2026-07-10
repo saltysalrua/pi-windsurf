@@ -18,10 +18,16 @@ async function writeSSE(res: ServerResponse, chunk: string): Promise<void> {
     await new Promise<void>(r => res.once("drain", () => r()));
   }
 }
-import { streamChatEvents, CloudChatError, type ChatHistoryItem, type ToolDef, type ResponseMeta } from "./chat";
+import { streamChatEvents, CloudChatError, truncateHeadTail, type ChatHistoryItem, type ToolDef, type ResponseMeta } from "./chat";
 import { resolveModelOrPassthrough, resolveModelName, getDefaultModel, getCanonicalModels } from "./models";
 import { loadCredentials } from "./oauth";
 import { getCachedCatalog, type InferenceConfig } from "./catalog";
+
+// L4 output thresholds: sized so 100% of real worker outputs fit without compaction.
+// Pi-crew measured 27 real outputs: max 9226 bytes, median 8272, 100% < 16KB.
+// Non-streaming responses above this get head+tail compaction (not head-only).
+const L4_MAX_RESPONSE_CHARS = 65_536; // 64KB — well above any measured real output
+const L4_TRUNC_MARKER = "\n…(output truncated, head+tail preserved)…\n";
 
 const WINDSURF_PROXY_HOST = "127.0.0.1";
 const WINDSURF_PROXY_PORT = 42100;
@@ -403,6 +409,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         }
         if (collectedToolCalls.length > 0 && finishReason === "stop") finishReason = "tool_calls";
 
+        // L4: apply head+tail compaction when response exceeds threshold.
+        // 100% of real outputs fit unchanged; only oversized responses compact.
+        if (collected.length > L4_MAX_RESPONSE_CHARS) {
+          collected = truncateHeadTail(collected, L4_MAX_RESPONSE_CHARS, L4_TRUNC_MARKER);
+        }
+
         const assistantMessage = collectedToolCalls.length > 0
           ? { role: "assistant" as const, content: collected, tool_calls: collectedToolCalls.map(tc => ({ id: tc.id, type: "function" as const, function: { name: tc.name, arguments: tc.args } })) }
           : { role: "assistant" as const, content: collected };
@@ -604,7 +616,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         }
 
         const contentBlocks: Array<Record<string, unknown>> = [];
-        if (collected) contentBlocks.push({ type: "text", text: collected });
+        // L4: head+tail compaction for oversized non-streaming responses.
+        if (collected) {
+          if (collected.length > L4_MAX_RESPONSE_CHARS) {
+            collected = truncateHeadTail(collected, L4_MAX_RESPONSE_CHARS, L4_TRUNC_MARKER);
+          }
+          contentBlocks.push({ type: "text", text: collected });
+        }
         for (const tc of collectedToolCalls) {
           let input: unknown = {};
           try { input = JSON.parse(tc.args); } catch { input = { raw: tc.args }; }

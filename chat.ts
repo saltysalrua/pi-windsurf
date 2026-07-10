@@ -184,8 +184,10 @@ function separateSystemMessages(messages: ChatHistoryItem[]): { messages: ChatHi
 
 const MAX_TOOL_DESC_LEN = 6998;
 
-/** L4: head+tail truncation preserving closing structure (JSON braces, markdown fences). */
-function truncateHeadTail(value: string, maxLen: number, marker: string): string {
+/** L4: head+tail truncation preserving closing structure (JSON braces, markdown fences).
+ *  75% head (opening structure + bulk) + 25% tail (closing fences/headings/lists).
+ *  No truncation when value fits — 100% of real outputs pass through unchanged. */
+export function truncateHeadTail(value: string, maxLen: number, marker: string): string {
   if (value.length <= maxLen) return value;
   const budget = maxLen - marker.length;
   const headLen = Math.ceil(budget * 0.75);
