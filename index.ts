@@ -9,7 +9,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { OAuthCredentials, OAuthLoginCallbacks, ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { startProxy, stopProxy, PROXY_SECRET, setProxyCredentials, getResponseMeta, serializeResponseMeta } from "./proxy";
+import { startProxy, stopProxy, PROXY_SECRET, setProxyCredentials, getResponseMeta, serializeResponseMeta, getChildProxyUrl } from "./proxy";
 import { loadCredentials, saveCredentials, deleteCredentials, DEFAULT_REGION, runLoginLoopback, registerUser, type PersistedCredentials } from "./oauth";
 import { clearCachedUserJwt } from "./auth";
 import { clearSessionIds } from "./chat";
@@ -127,9 +127,23 @@ async function refreshWindsurfToken(c: OAuthCredentials): Promise<OAuthCredentia
 export default async function (pi: ExtensionAPI) {
   _pi = pi;
 
-  const proxyPort = await startProxy();
-  const baseUrl = `http://127.0.0.1:${proxyPort}/v1`;
-  const anthropicBaseUrl = `http://127.0.0.1:${proxyPort}`; // Anthropic SDK appends /v1/messages
+  // Child pi-crew workers reuse the parent's proxy instead of starting their own.
+  // The parent proxy accepts the persisted apiKey as a valid Bearer token.
+  const childProxy = getChildProxyUrl();
+  let baseUrl: string;
+  let anthropicBaseUrl: string;
+  let providerApiKey: string;
+
+  if (childProxy) {
+    baseUrl = childProxy.baseUrl;
+    anthropicBaseUrl = childProxy.anthropicBaseUrl;
+    providerApiKey = childProxy.apiKey;
+  } else {
+    const proxyPort = await startProxy();
+    baseUrl = `http://127.0.0.1:${proxyPort}/v1`;
+    anthropicBaseUrl = `http://127.0.0.1:${proxyPort}`; // Anthropic SDK appends /v1/messages
+    providerApiKey = PROXY_SECRET;
+  }
 
   let hasCreds = false;
   try {
@@ -150,7 +164,7 @@ export default async function (pi: ExtensionAPI) {
   // Register OpenAI-compatible provider (Pi sends OpenAI format -> /v1/chat/completions)
   pi.registerProvider("windsurf", {
     name: "Cognition (Windsurf)",
-    baseUrl, apiKey: PROXY_SECRET, api: "openai-completions", authHeader: true,
+    baseUrl, apiKey: providerApiKey, api: "openai-completions", authHeader: true,
     models,
     compat: {
       supportsDeveloperRole: true,        // OpenAI format supports developer role; proxy maps to user (source=1)
@@ -171,7 +185,7 @@ export default async function (pi: ExtensionAPI) {
   // Register Anthropic Messages provider (Pi sends Anthropic format -> /v1/messages)
   pi.registerProvider("windsurf-anthropic", {
     name: "Cognition (Windsurf Anthropic)",
-    baseUrl: anthropicBaseUrl, apiKey: PROXY_SECRET, api: "anthropic-messages", authHeader: true,
+    baseUrl: anthropicBaseUrl, apiKey: providerApiKey, api: "anthropic-messages", authHeader: true,
     models,
     compat: {
       supportsDeveloperRole: false,

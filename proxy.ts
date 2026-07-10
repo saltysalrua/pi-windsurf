@@ -6,6 +6,9 @@
  * WindSurf's cloud-direct GetChatMessage wire format.
  */
 import * as crypto from "crypto";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { streamChatEvents, CloudChatError, type ChatHistoryItem, type ToolDef, type ResponseMeta } from "./chat";
 import { resolveModelOrPassthrough, resolveModelName, getDefaultModel, getCanonicalModels } from "./models";
@@ -15,8 +18,33 @@ import { getCachedCatalog, type InferenceConfig } from "./catalog";
 const WINDSURF_PROXY_HOST = "127.0.0.1";
 const WINDSURF_PROXY_PORT = 42100;
 
+const PORT_FILE = path.join(os.homedir(), ".config", "opencode-windsurf-auth", "proxy-port");
+
 // Per-process secret — same-process callers use this as Bearer token.
 export const PROXY_SECRET: string = crypto.randomBytes(32).toString("hex");
+
+/** Detect if this process is a pi-crew child worker. */
+function isChildWorker(): boolean {
+  return process.env.PI_CREW_KIND === "subagent" || process.env.PI_TEAMS_WORKER === "1";
+}
+
+/** Read the parent's proxy port from the well-known file. */
+function readParentProxyPort(): number | undefined {
+  try {
+    const raw = fs.readFileSync(PORT_FILE, "utf8").trim();
+    const port = parseInt(raw, 10);
+    if (port > 0 && port < 65536) return port;
+  } catch {}
+  return undefined;
+}
+
+/** Write the proxy port to the well-known file so child workers can discover it. */
+function writeProxyPort(port: number): void {
+  try {
+    fs.mkdirSync(path.dirname(PORT_FILE), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(PORT_FILE, String(port), { mode: 0o600 });
+  } catch {}
+}
 
 // In-memory credentials cache — set from extension on startup/after login
 export let proxyCredentials: { apiKey: string; apiServerUrl: string } | null = null;
@@ -636,6 +664,7 @@ export function startProxy(port: number = WINDSURF_PROXY_PORT): Promise<number> 
         srv.listen(0, WINDSURF_PROXY_HOST, () => {
           const addr = srv.address() as { port: number };
           serverInstance = srv;
+          writeProxyPort(addr.port);
           resolve(addr.port);
         });
         return;
@@ -645,9 +674,23 @@ export function startProxy(port: number = WINDSURF_PROXY_PORT): Promise<number> 
     srv.listen(port, WINDSURF_PROXY_HOST, () => {
       serverInstance = srv;
       const addr = srv.address() as { port: number };
+      writeProxyPort(addr.port);
       resolve(addr.port);
     });
   });
+}
+
+/** For child workers: don't start a proxy, connect to the parent's instead. */
+export function getChildProxyUrl(): { baseUrl: string; anthropicBaseUrl: string; apiKey: string } | null {
+  if (!isChildWorker()) return null;
+  const parentPort = readParentProxyPort() ?? WINDSURF_PROXY_PORT;
+  const creds = loadCredentials();
+  if (!creds) return null;
+  return {
+    baseUrl: `http://127.0.0.1:${parentPort}/v1`,
+    anthropicBaseUrl: `http://127.0.0.1:${parentPort}`,
+    apiKey: creds.apiKey,
+  };
 }
 
 export function stopProxy(): void {
