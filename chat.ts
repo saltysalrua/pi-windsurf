@@ -184,11 +184,18 @@ function separateSystemMessages(messages: ChatHistoryItem[]): { messages: ChatHi
 
 const MAX_TOOL_DESC_LEN = 6998;
 
+/** L4: head+tail truncation preserving closing structure (JSON braces, markdown fences). */
+function truncateHeadTail(value: string, maxLen: number, marker: string): string {
+  if (value.length <= maxLen) return value;
+  const budget = maxLen - marker.length;
+  const headLen = Math.ceil(budget * 0.75);
+  const tailLen = budget - headLen;
+  return value.slice(0, headLen) + marker + value.slice(value.length - tailLen);
+}
+
 function encodeToolDef(tool: ToolDef): Buffer {
   const rawDesc = tool.description ?? "";
-  const desc = rawDesc.length > MAX_TOOL_DESC_LEN
-    ? rawDesc.slice(0, MAX_TOOL_DESC_LEN - 24) + "\n…(truncated for cloud)"
-    : rawDesc;
+  const desc = truncateHeadTail(rawDesc, MAX_TOOL_DESC_LEN, "\n…(truncated)…\n");
   return Buffer.concat([
     encodeString(1, tool.name),
     encodeString(2, desc),
@@ -470,7 +477,7 @@ export async function* streamChatEvents(req: CloudChatRequest): AsyncGenerator<C
 
   if (!resp.ok) {
     const text = await resp.text();
-    throw new CloudChatError(`GetChatMessage HTTP ${resp.status}: ${text.slice(0, 300)}`);
+    throw new CloudChatError(`GetChatMessage HTTP ${resp.status}: ${truncateHeadTail(text, 600, " …(truncated)… ")}`);
   }
   if (!resp.body) throw new CloudChatError("GetChatMessage response had no body stream");
 

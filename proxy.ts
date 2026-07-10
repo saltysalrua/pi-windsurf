@@ -10,6 +10,14 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
+
+/** L4: backpressure-safe SSE writer. Waits for 'drain' when res.write returns false. */
+async function writeSSE(res: ServerResponse, chunk: string): Promise<void> {
+  if (res.writableEnded) return;
+  if (!res.write(chunk)) {
+    await new Promise<void>(r => res.once("drain", () => r()));
+  }
+}
 import { streamChatEvents, CloudChatError, type ChatHistoryItem, type ToolDef, type ResponseMeta } from "./chat";
 import { resolveModelOrPassthrough, resolveModelName, getDefaultModel, getCanonicalModels } from "./models";
 import { loadCredentials } from "./oauth";
@@ -309,11 +317,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
             if (ev.kind === "text") {
               const chunk = { id: responseId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: requestedModel, choices: [{ index: 0, delta: role ? { role, content: ev.text } : { content: ev.text }, finish_reason: null }] };
-              res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+              await writeSSE(res, `data: ${JSON.stringify(chunk)}\n\n`);
               firstChunkSent = true;
             } else if (ev.kind === "reasoning") {
               const chunk = { id: responseId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: requestedModel, choices: [{ index: 0, delta: role ? { role, reasoning: ev.text } : { reasoning: ev.text }, finish_reason: null }] };
-              res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+              await writeSSE(res, `data: ${JSON.stringify(chunk)}\n\n`);
               firstChunkSent = true;
             } else if (ev.kind === "tool_call_start") {
               toolCallIndex += 1;
@@ -322,14 +330,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
               const baseDelta = { tool_calls: [{ index: toolCallIndex, id: ev.id, type: "function", function: { name: ev.name, arguments: "" } }] };
               const delta = firstChunkSent ? baseDelta : { role: "assistant", ...baseDelta };
               const chunk = { id: responseId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: requestedModel, choices: [{ index: 0, delta, finish_reason: null }] };
-              res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+              await writeSSE(res, `data: ${JSON.stringify(chunk)}\n\n`);
               firstChunkSent = true;
             } else if (ev.kind === "tool_call_args") {
               if (lastToolCallId === undefined || toolCallIndex < 0) continue;
               const routeKey = ev.id ?? lastToolCallId;
               const idx = toolIdToIndex.get(routeKey) ?? toolCallIndex;
               const chunk = { id: responseId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: requestedModel, choices: [{ index: 0, delta: { tool_calls: [{ index: idx, function: { arguments: ev.argsDelta } }] }, finish_reason: null }] };
-              res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+              await writeSSE(res, `data: ${JSON.stringify(chunk)}\n\n`);
             } else if (ev.kind === "finish") {
               finishReason = ev.reason;
             } else if (ev.kind === "usage") {
@@ -344,22 +352,22 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
           const finalReason = finishReason ?? (toolCallIndex >= 0 ? "tool_calls" : "stop");
           const finishChunk = { id: responseId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: requestedModel, choices: [{ index: 0, delta: {}, finish_reason: finalReason }] };
-          res.write(`data: ${JSON.stringify(finishChunk)}\n\n`);
+          await writeSSE(res, `data: ${JSON.stringify(finishChunk)}\n\n`);
 
           if (usage) {
             const usageChunk: Record<string, unknown> = { id: responseId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: requestedModel, choices: [], usage: { prompt_tokens: usage.promptTokens ?? 0, completion_tokens: usage.completionTokens ?? 0, total_tokens: usage.totalTokens ?? 0 } };
             if (responseMeta) usageChunk["_windsurf_meta"] = serializeResponseMeta(responseMeta);
-            res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
+            await writeSSE(res, `data: ${JSON.stringify(usageChunk)}\n\n`);
           }
-          res.write("data: [DONE]\n\n");
+          await writeSSE(res, "data: [DONE]\n\n");
           res.end();
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : "Unknown error";
           try {
-            res.write(`data: ${JSON.stringify({ error: { message: errorMessage } })}\n\n`);
+            await writeSSE(res, `data: ${JSON.stringify({ error: { message: errorMessage } })}\n\n`);
             const fChunk = { id: responseId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: requestedModel, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] };
-            res.write(`data: ${JSON.stringify(fChunk)}\n\n`);
-            res.write("data: [DONE]\n\n");
+            await writeSSE(res, `data: ${JSON.stringify(fChunk)}\n\n`);
+            await writeSSE(res, "data: [DONE]\n\n");
             res.end();
           } catch { /* socket dead */ }
         }
@@ -502,11 +510,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           let inputTokens = 0;
           let outputTokens = 0;
 
-          const writeSse = (event: string, data: object) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-          const openTextBlock = () => { writeSse("content_block_start", { type: "content_block_start", index: blockIndex, content_block: { type: "text", text: "" } }); blockOpen = true; };
-          const closeBlock = () => { writeSse("content_block_stop", { type: "content_block_stop", index: blockIndex }); blockOpen = false; blockIndex++; };
+          const writeSse = async (event: string, data: object): Promise<void> => writeSSE(res, `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+          const openTextBlock = async () => { await writeSse("content_block_start", { type: "content_block_start", index: blockIndex, content_block: { type: "text", text: "" } }); blockOpen = true; };
+          const closeBlock = async () => { await writeSse("content_block_stop", { type: "content_block_stop", index: blockIndex }); blockOpen = false; blockIndex++; };
 
-          writeSse("message_start", {
+          await writeSse("message_start", {
             type: "message_start",
             message: { id: msgId, type: "message", role: "assistant", content: [], model: requestedModel, stop_reason: null, usage: { input_tokens: 0, output_tokens: 0 } },
           });
@@ -523,21 +531,21 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
             completionOpts: { maxOutputTokens: requestedMaxTokens },
           })) {
             if (ev.kind === "text") {
-              if (!blockOpen) openTextBlock();
-              writeSse("content_block_delta", { type: "content_block_delta", index: blockIndex, delta: { type: "text_delta", text: ev.text } });
+              if (!blockOpen) await openTextBlock();
+              await writeSse("content_block_delta", { type: "content_block_delta", index: blockIndex, delta: { type: "text_delta", text: ev.text } });
             } else if (ev.kind === "reasoning") {
-              if (!blockOpen) openTextBlock();
-              writeSse("content_block_delta", { type: "content_block_delta", index: blockIndex, delta: { type: "text_delta", text: ev.text } });
+              if (!blockOpen) await openTextBlock();
+              await writeSse("content_block_delta", { type: "content_block_delta", index: blockIndex, delta: { type: "text_delta", text: ev.text } });
             } else if (ev.kind === "tool_call_start") {
-              if (blockOpen) closeBlock();
-              writeSse("content_block_start", {
+              if (blockOpen) await closeBlock();
+              await writeSse("content_block_start", {
                 type: "content_block_start", index: blockIndex,
                 content_block: { type: "tool_use", id: ev.id, name: ev.name, input: {} },
               });
               blockOpen = true;
             } else if (ev.kind === "tool_call_args") {
               if (ev.argsDelta) {
-                writeSse("content_block_delta", {
+                await writeSse("content_block_delta", {
                   type: "content_block_delta", index: blockIndex,
                   delta: { type: "input_json_delta", partial_json: ev.argsDelta },
                 });
@@ -550,20 +558,20 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
             }
           }
 
-          if (blockOpen) closeBlock();
+          if (blockOpen) await closeBlock();
 
           const stopReason = finishReason === "tool_calls" ? "tool_use" : finishReason === "length" ? "max_tokens" : "end_turn";
-          writeSse("message_delta", {
+          await writeSse("message_delta", {
             type: "message_delta",
             delta: { stop_reason: stopReason, stop_sequence: null },
             usage: { output_tokens: outputTokens },
           });
-          writeSse("message_stop", { type: "message_stop" });
+          await writeSse("message_stop", { type: "message_stop" });
           res.end();
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : "Unknown error";
           try {
-            writeSse("error", { type: "error", error: { type: "api_error", message: errorMessage } });
+            await writeSse("error", { type: "error", error: { type: "api_error", message: errorMessage } });
             res.end();
           } catch (writeErr) { /* client disconnected */ }
         }
