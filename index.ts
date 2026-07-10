@@ -15,6 +15,7 @@ import { clearCachedUserJwt } from "./auth";
 import { clearSessionIds } from "./chat";
 import { clearCachedCatalog, getCachedCatalog, type ModelCatalogEntry, type ModelFeatures } from "./catalog";
 import { getUserStatus, clearAssignmentCache } from "./assign";
+import { windsurfEventBus } from "./event-log";
 
 let _pi: ExtensionAPI | null = null;
 let _apiKey = "";
@@ -316,6 +317,7 @@ export default async function (pi: ExtensionAPI) {
         weeklyQuotaRemainingPercent: status.weeklyQuotaRemainingPercent,
       };
       pi.appendEntry("windsurf-status", _lastStatusEntry);
+      windsurfEventBus.emit("windsurf:status", _lastStatusEntry);
       pi.events.emit("windsurf:status", _lastStatusEntry);
     } catch {}
   }
@@ -366,6 +368,7 @@ export default async function (pi: ExtensionAPI) {
     const m = event.model;
     if (m?.id && m.provider === "windsurf") {
       ctx.ui.setStatus("windsurf", m.id);
+      windsurfEventBus.emit("windsurf:model_select", { modelId: m.id });
       pi.events.emit("windsurf:model_select", { modelId: m.id });
     }
   });
@@ -375,6 +378,7 @@ export default async function (pi: ExtensionAPI) {
     if (ctx.model?.provider === "windsurf") {
       const level = event.level;
       ctx.ui.setStatus("windsurf", `${ctx.model?.id ?? "?"} · ${level}`);
+      windsurfEventBus.emit("windsurf:thinking_level", { level, modelId: ctx.model?.id });
       pi.events.emit("windsurf:thinking_level", { level, modelId: ctx.model?.id });
     }
   });
@@ -394,6 +398,7 @@ export default async function (pi: ExtensionAPI) {
     if (event.status === 429) {
       const retryAfter = event.headers?.["retry-after"];
       ctx.ui.notify(`Windsurf rate limited. Retry after ${retryAfter ?? "?"}s`, "warning");
+      windsurfEventBus.emit("windsurf:error", { type: "rate_limit", status: 429, retryAfter });
       pi.events.emit("windsurf:error", { type: "rate_limit", status: 429, retryAfter });
       pi.sendMessage({
         customType: "windsurf-context",
@@ -403,8 +408,10 @@ export default async function (pi: ExtensionAPI) {
       }, { deliverAs: "followUp" });
     } else if (event.status >= 500) {
       ctx.ui.notify(`Windsurf server error: ${event.status}`, "error");
+      windsurfEventBus.emit("windsurf:error", { type: "server_error", status: event.status });
       pi.events.emit("windsurf:error", { type: "server_error", status: event.status });
     } else if (event.status >= 400) {
+      windsurfEventBus.emit("windsurf:error", { type: "client_error", status: event.status });
       pi.events.emit("windsurf:error", { type: "client_error", status: event.status });
     }
   });
@@ -481,6 +488,7 @@ export default async function (pi: ExtensionAPI) {
     ctx.ui.setStatus("windsurf", undefined);
     _pi = null;
     _lastStatusEntry = null;
+    windsurfEventBus.dispose();
     stopProxy();
   });
 }
