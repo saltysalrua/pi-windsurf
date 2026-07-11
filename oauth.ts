@@ -94,20 +94,28 @@ export async function registerUser(
       const errJson = JSON.parse(text) as { code?: string; message?: string };
       connectCode = errJson.code;
       if (errJson.message) message = errJson.message;
-    } catch {}
+    } catch {
+      // keep raw text as error message
+    }
     const traceMatch = message.match(TRACE_ID_RE);
     throw new WindsurfRegistrationError(message, response.status, connectCode, traceMatch?.[1]);
   }
 
-  const parsed = JSON.parse(text) as { api_key?: string; name?: string; api_server_url?: string; redirect_url?: string };
-  const apiKey = parsed.api_key;
-  const name = parsed.name;
-  const apiServerUrl = parsed.api_server_url;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(text) as Record<string, unknown>;
+  } catch (parseErr) {
+    throw new WindsurfRegistrationError(`RegisterUser returned 200 but body is not valid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`, response.status, "malformed_response");
+  }
+  const apiKey = typeof parsed.api_key === "string" ? parsed.api_key : "";
+  const name = typeof parsed.name === "string" ? parsed.name : "";
+  const apiServerUrl = typeof parsed.api_server_url === "string" ? parsed.api_server_url : "";
+  const redirectUrl = typeof parsed.redirect_url === "string" ? parsed.redirect_url : undefined;
 
   if (!apiKey) throw new WindsurfRegistrationError("RegisterUser returned 200 but api_key was empty", response.status, "malformed_response");
   if (!name) throw new WindsurfRegistrationError("RegisterUser returned 200 but name was empty", response.status, "malformed_response");
 
-  return { apiKey, name, apiServerUrl, redirectUrl: parsed.redirect_url };
+  return { apiKey, name, apiServerUrl: apiServerUrl || DEFAULT_REGION.registerApiServerUrl.replace(/register\./, "server.self-serve."), redirectUrl };
 }
 
 // ----------------------------------------------------------------------------
@@ -133,14 +141,18 @@ function ensureDir(): void {
 export function loadCredentials(): PersistedCredentials | null {
   const p = getCredentialsPath();
   if (!fs.existsSync(p)) return null;
-  const raw = fs.readFileSync(p, "utf8");
-  const parsed = JSON.parse(raw) as Record<string, unknown>;
-  if (typeof parsed.apiKey !== "string" || !parsed.apiKey ||
-      typeof parsed.name !== "string" || !parsed.name ||
-      typeof parsed.apiServerUrl !== "string" || !parsed.apiServerUrl) {
-    throw new Error(`Credentials file at ${p} is missing required fields.`);
+  try {
+    const raw = fs.readFileSync(p, "utf8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof parsed.apiKey !== "string" || !parsed.apiKey ||
+        typeof parsed.name !== "string" || !parsed.name ||
+        typeof parsed.apiServerUrl !== "string" || !parsed.apiServerUrl) {
+      return null;
+    }
+    return parsed as unknown as PersistedCredentials;
+  } catch {
+    return null;
   }
-  return parsed as unknown as PersistedCredentials;
 }
 
 export function saveCredentials(creds: PersistedCredentials): void {

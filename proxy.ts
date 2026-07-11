@@ -11,27 +11,9 @@ import * as path from "path";
 import * as os from "os";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 
-/** L4: backpressure-safe SSE writer. Waits for 'drain' when res.write returns false.
- *  Timeout-protected: if drain doesn't fire within 5s (disconnected client),
- *  the write is abandoned to prevent indefinite hangs. */
-async function writeSSE(res: ServerResponse, chunk: string): Promise<void> {
-  if (res.writableEnded || res.destroyed) return;
-  let ok: boolean;
-  try {
-    ok = res.write(chunk);
-  } catch {
-    return; // socket destroyed between check and write
-  }
-  if (!ok) {
-    await new Promise<void>(r => {
-      const timer = setTimeout(() => { res.removeListener("drain", onDrain); r(); }, 5000);
-      const onDrain = () => { clearTimeout(timer); r(); };
-      res.once("drain", onDrain);
-    });
-  }
-}
-import { streamChatEvents, CloudChatError, truncateHeadTail, type ChatHistoryItem, type ToolDef, type ResponseMeta } from "./chat";
-import { resolveModelOrPassthrough, resolveModelName, getDefaultModel, getCanonicalModels } from "./models";
+import { streamChatEvents, truncateHeadTail, type ChatHistoryItem, type ToolDef, type ResponseMeta } from "./chat";
+import { AnthropicStreamTranslator, openAIToAnthropic } from "./anthropic";
+import { resolveModelName, getDefaultModel, getCanonicalModels } from "./models";
 import { loadCredentials } from "./oauth";
 import { getCachedCatalog, type InferenceConfig } from "./catalog";
 
@@ -76,6 +58,26 @@ function writeProxyPort(port: number): void {
 export let proxyCredentials: { apiKey: string; apiServerUrl: string } | null = null;
 export function setProxyCredentials(creds: { apiKey: string; apiServerUrl: string } | null): void {
   proxyCredentials = creds;
+}
+
+/** L4: backpressure-safe SSE writer. Waits for 'drain' when res.write returns false.
+ *  Timeout-protected: if drain doesn't fire within 5s (disconnected client),
+ *  the write is abandoned to prevent indefinite hangs. */
+async function writeSSE(res: ServerResponse, chunk: string): Promise<void> {
+  if (res.writableEnded || res.destroyed) return;
+  let ok: boolean;
+  try {
+    ok = res.write(chunk);
+  } catch {
+    return; // socket destroyed between check and write
+  }
+  if (!ok) {
+    await new Promise<void>(r => {
+      const timer = setTimeout(() => { res.removeListener("drain", onDrain); r(); }, 5000);
+      const onDrain = () => { clearTimeout(timer); r(); };
+      res.once("drain", onDrain);
+    });
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -317,7 +319,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           const toolIdToIndex = new Map<string, number>();
           let lastToolCallId: string | undefined;
           let finishReason: "stop" | "tool_calls" | "length" | "content_filter" | null = null;
-          let usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number } | null = null;
+          let usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number; cachedInputTokens?: number; cacheCreationInputTokens?: number } | null = null;
           let responseMeta: ResponseMeta | null = null;
 
           for await (const ev of streamChatEvents({
@@ -374,6 +376,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
           if (usage) {
             const usageChunk: Record<string, unknown> = { id: responseId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: requestedModel, choices: [], usage: { prompt_tokens: usage.promptTokens ?? 0, completion_tokens: usage.completionTokens ?? 0, total_tokens: usage.totalTokens ?? 0 } };
+            if (usage.cachedInputTokens !== undefined) (usageChunk.usage as Record<string, unknown>).cache_read_input_tokens = usage.cachedInputTokens;
+            if (usage.cacheCreationInputTokens !== undefined) (usageChunk.usage as Record<string, unknown>).cache_creation_input_tokens = usage.cacheCreationInputTokens;
             if (responseMeta) usageChunk["_windsurf_meta"] = serializeResponseMeta(responseMeta);
             await writeSSE(res, `data: ${JSON.stringify(usageChunk)}\n\n`);
           }
@@ -393,7 +397,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         // Non-streaming response
         let collected = "";
         let finishReason: "stop" | "tool_calls" | "length" | "content_filter" = "stop";
-        let usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number } | null = null;
+        let usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number; cachedInputTokens?: number; cacheCreationInputTokens?: number } | null = null;
         let responseMeta: ResponseMeta | null = null;
         type CollectedToolCall = { id: string; name: string; args: string };
         const collectedToolCalls: CollectedToolCall[] = [];
@@ -416,7 +420,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           else if (ev.kind === "tool_call_start") { currentToolCall = { id: ev.id, name: ev.name, args: "" }; collectedToolCalls.push(currentToolCall); }
           else if (ev.kind === "tool_call_args") { if (currentToolCall) currentToolCall.args += ev.argsDelta; }
           else if (ev.kind === "finish") finishReason = ev.reason;
-          else if (ev.kind === "usage") usage = { promptTokens: ev.promptTokens, completionTokens: ev.completionTokens, totalTokens: ev.totalTokens };
+          else if (ev.kind === "usage") usage = { promptTokens: ev.promptTokens, completionTokens: ev.completionTokens, totalTokens: ev.totalTokens, cachedInputTokens: ev.cachedInputTokens, cacheCreationInputTokens: ev.cacheCreationInputTokens };
           else if (ev.kind === "meta") responseMeta = ev.fields;
         }
         if (collectedToolCalls.length > 0 && finishReason === "stop") finishReason = "tool_calls";
@@ -441,7 +445,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           created: Math.floor(Date.now() / 1000),
           model: requestedModel,
           choices: [{ index: 0, message: assistantMessage, finish_reason: finishReason }],
-          ...(usage ? { usage: { prompt_tokens: usage.promptTokens ?? 0, completion_tokens: usage.completionTokens ?? 0, total_tokens: usage.totalTokens ?? 0 } } : {}),
+          ...(usage ? {
+            usage: {
+              prompt_tokens: usage.promptTokens ?? 0,
+              completion_tokens: usage.completionTokens ?? 0,
+              total_tokens: usage.totalTokens ?? 0,
+              ...(usage.cachedInputTokens !== undefined ? { cache_read_input_tokens: usage.cachedInputTokens } : {}),
+              ...(usage.cacheCreationInputTokens !== undefined ? { cache_creation_input_tokens: usage.cacheCreationInputTokens } : {}),
+            },
+          } : {}),
         };
         if (responseMeta) resp["_windsurf_meta"] = serializeResponseMeta(responseMeta);
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -527,22 +539,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         const abort = new AbortController();
         req.on("close", () => { if (!res.writableEnded) abort.abort(); });
 
+        const translator = new AnthropicStreamTranslator(res, msgId, requestedModel, null, 0, anthroBody.stop_sequences);
+
         try {
-          let blockIndex = 0;
-          let blockOpen = false;
-          let finishReason: string | null = null;
-          let inputTokens = 0;
-          let outputTokens = 0;
-
-          const writeSse = async (event: string, data: object): Promise<void> => writeSSE(res, `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-          const openTextBlock = async () => { await writeSse("content_block_start", { type: "content_block_start", index: blockIndex, content_block: { type: "text", text: "" } }); blockOpen = true; };
-          const closeBlock = async () => { await writeSse("content_block_stop", { type: "content_block_stop", index: blockIndex }); blockOpen = false; blockIndex++; };
-
-          await writeSse("message_start", {
-            type: "message_start",
-            message: { id: msgId, type: "message", role: "assistant", content: [], model: requestedModel, stop_reason: null, usage: { input_tokens: 0, output_tokens: 0 } },
-          });
-
           for await (const ev of streamChatEvents({
             apiKey: creds.apiKey,
             apiServerUrl: creds.apiServerUrl,
@@ -555,56 +554,78 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
             completionOpts: { maxOutputTokens: requestedMaxTokens },
           })) {
             if (ev.kind === "text") {
-              if (!blockOpen) await openTextBlock();
-              await writeSse("content_block_delta", { type: "content_block_delta", index: blockIndex, delta: { type: "text_delta", text: ev.text } });
-            } else if (ev.kind === "reasoning") {
-              if (!blockOpen) await openTextBlock();
-              await writeSse("content_block_delta", { type: "content_block_delta", index: blockIndex, delta: { type: "text_delta", text: ev.text } });
-            } else if (ev.kind === "tool_call_start") {
-              if (blockOpen) await closeBlock();
-              await writeSse("content_block_start", {
-                type: "content_block_start", index: blockIndex,
-                content_block: { type: "tool_use", id: ev.id, name: ev.name, input: {} },
+              translator.handleOpenAIChunk({
+                id: msgId,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: requestedModel,
+                choices: [{ index: 0, delta: { content: ev.text }, finish_reason: null }],
               });
-              blockOpen = true;
+            } else if (ev.kind === "reasoning") {
+              translator.handleOpenAIChunk({
+                id: msgId,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: requestedModel,
+                choices: [{ index: 0, delta: { reasoning: ev.text }, finish_reason: null }],
+              });
+            } else if (ev.kind === "tool_call_start") {
+              translator.handleOpenAIChunk({
+                id: msgId,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: requestedModel,
+                choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: ev.id, type: "function", function: { name: ev.name, arguments: "" } }] }, finish_reason: null }],
+              });
             } else if (ev.kind === "tool_call_args") {
-              if (ev.argsDelta) {
-                await writeSse("content_block_delta", {
-                  type: "content_block_delta", index: blockIndex,
-                  delta: { type: "input_json_delta", partial_json: ev.argsDelta },
-                });
-              }
+              translator.handleOpenAIChunk({
+                id: msgId,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: requestedModel,
+                choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: ev.argsDelta } }] }, finish_reason: null }],
+              });
             } else if (ev.kind === "finish") {
-              finishReason = ev.reason;
+              translator.handleOpenAIChunk({
+                id: msgId,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: requestedModel,
+                choices: [{ index: 0, delta: {}, finish_reason: ev.reason }],
+                usage: {
+                  prompt_tokens: 0,
+                  completion_tokens: 0,
+                  total_tokens: 0,
+                },
+              });
             } else if (ev.kind === "usage") {
-              inputTokens = ev.promptTokens ?? 0;
-              outputTokens = ev.completionTokens ?? 0;
+              translator.handleOpenAIChunk({
+                id: msgId,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: requestedModel,
+                choices: [],
+                usage: {
+                  prompt_tokens: ev.promptTokens ?? 0,
+                  completion_tokens: ev.completionTokens ?? 0,
+                  total_tokens: (ev.promptTokens ?? 0) + (ev.completionTokens ?? 0),
+                  cache_creation_input_tokens: ev.cacheCreationInputTokens,
+                  cache_read_input_tokens: ev.cachedInputTokens,
+                },
+              });
             }
           }
 
-          if (blockOpen) await closeBlock();
-
-          const stopReason = finishReason === "tool_calls" ? "tool_use" : finishReason === "length" ? "max_tokens" : "end_turn";
-          await writeSse("message_delta", {
-            type: "message_delta",
-            delta: { stop_reason: stopReason, stop_sequence: null },
-            usage: { output_tokens: outputTokens },
-          });
-          await writeSse("message_stop", { type: "message_stop" });
-          res.end();
+          translator.finish();
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : "Unknown error";
-          try {
-            await writeSse("error", { type: "error", error: { type: "api_error", message: errorMessage } });
-            res.end();
-          } catch (writeErr) { /* client disconnected */ }
+          translator.error(errorMessage);
         }
       } else {
         // Non-streaming
         let collected = "";
-        let finishReason: string | null = null;
-        let inputTokens = 0;
-        let outputTokens = 0;
+        let finishReason: "stop" | "tool_calls" | "length" | "content_filter" | null = null;
+        let usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number; cachedInputTokens?: number; cacheCreationInputTokens?: number } | null = null;
         const collectedToolCalls: Array<{ id: string; name: string; args: string }> = [];
         let currentToolCall: { id: string; name: string; args: string } | null = null;
 
@@ -624,33 +645,29 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           else if (ev.kind === "tool_call_start") { currentToolCall = { id: ev.id, name: ev.name, args: "" }; collectedToolCalls.push(currentToolCall); }
           else if (ev.kind === "tool_call_args") { if (currentToolCall) currentToolCall.args += ev.argsDelta; }
           else if (ev.kind === "finish") finishReason = ev.reason;
-          else if (ev.kind === "usage") { inputTokens = ev.promptTokens ?? 0; outputTokens = ev.completionTokens ?? 0; }
+          else if (ev.kind === "usage") usage = { promptTokens: ev.promptTokens, completionTokens: ev.completionTokens, totalTokens: ev.totalTokens, cachedInputTokens: ev.cachedInputTokens, cacheCreationInputTokens: ev.cacheCreationInputTokens };
         }
 
-        const contentBlocks: Array<Record<string, unknown>> = [];
-        // L4: head+tail compaction for oversized non-streaming responses.
-        if (collected) {
-          if (collected.length > L4_MAX_RESPONSE_CHARS) {
-            collected = truncateHeadTail(collected, L4_MAX_RESPONSE_CHARS, L4_TRUNC_MARKER);
-          }
-          contentBlocks.push({ type: "text", text: collected });
-        }
-        for (const tc of collectedToolCalls) {
-          let input: unknown = {};
-          try { input = JSON.parse(tc.args); } catch { input = { raw: tc.args }; }
-          contentBlocks.push({ type: "tool_use", id: tc.id, name: tc.name, input });
+        const responseId = `msg_${crypto.randomBytes(12).toString("hex")}`;
+        const assistantMessage = collectedToolCalls.length > 0
+          ? {
+              role: "assistant" as const,
+              content: collected,
+              tool_calls: collectedToolCalls.map(tc => ({ id: tc.id, type: "function" as const, function: { name: tc.name, arguments: tc.args } })),
+            }
+          : { role: "assistant" as const, content: collected };
+
+        // L4: apply head+tail compaction when response exceeds threshold.
+        if (typeof assistantMessage.content === "string" && assistantMessage.content.length > L4_MAX_RESPONSE_CHARS) {
+          assistantMessage.content = truncateHeadTail(assistantMessage.content, L4_MAX_RESPONSE_CHARS, L4_TRUNC_MARKER);
         }
 
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({
-          id: msgId,
-          type: "message",
-          role: "assistant",
-          content: contentBlocks,
+        res.end(JSON.stringify(openAIToAnthropic({
+          choices: [{ message: assistantMessage, finish_reason: finishReason }],
           model: requestedModel,
-          stop_reason: collectedToolCalls.length > 0 ? "tool_use" : (finishReason === "length" ? "max_tokens" : "end_turn"),
-          usage: { input_tokens: inputTokens, output_tokens: outputTokens },
-        }));
+          usage: usage ? { prompt_tokens: usage.promptTokens, completion_tokens: usage.completionTokens, total_tokens: usage.totalTokens, cache_creation_input_tokens: usage.cacheCreationInputTokens, cache_read_input_tokens: usage.cachedInputTokens } : {},
+        }, requestedModel, responseId, null, anthroBody.stop_sequences)));
       }
       return;
     }
