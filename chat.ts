@@ -186,12 +186,30 @@ const MAX_TOOL_DESC_LEN = 6998;
 
 /** L4: head+tail truncation preserving closing structure (JSON braces, markdown fences).
  *  75% head (opening structure + bulk) + 25% tail (closing fences/headings/lists).
- *  No truncation when value fits — 100% of real outputs pass through unchanged. */
+ *  No truncation when value fits — 100% of real outputs pass through unchanged.
+ *  Surrogate-safe: adjusts boundaries to avoid splitting UTF-16 surrogate pairs. */
 export function truncateHeadTail(value: string, maxLen: number, marker: string): string {
   if (value.length <= maxLen) return value;
+  // Guard: if marker alone exceeds maxLen, return marker truncated to maxLen.
+  if (marker.length >= maxLen) return marker.slice(0, maxLen);
   const budget = maxLen - marker.length;
-  const headLen = Math.ceil(budget * 0.75);
-  const tailLen = budget - headLen;
+  let headLen = Math.ceil(budget * 0.75);
+  let tailLen = budget - headLen;
+  // Surrogate-safe head boundary: slice(0, headLen) includes indices 0..headLen-1.
+  // If s[headLen-1] is a high surrogate, the last included char starts a split pair.
+  // Back up so the head ends on a complete code point.
+  if (headLen > 0 && headLen < value.length) {
+    const lastInHead = value.charCodeAt(headLen - 1);
+    if (lastInHead >= 0xD800 && lastInHead <= 0xDBFF) headLen--;
+  }
+  // Surrogate-safe tail boundary: slice(value.length - tailLen) starts at tailStart.
+  // If s[tailStart] is a low surrogate, the first included char is the second half
+  // of a split pair. Advance so the tail starts on a complete code point.
+  if (tailLen > 0 && tailLen < value.length) {
+    const tailStart = value.length - tailLen;
+    const firstInTail = value.charCodeAt(tailStart);
+    if (firstInTail >= 0xDC00 && firstInTail <= 0xDFFF) tailLen--;
+  }
   return value.slice(0, headLen) + marker + value.slice(value.length - tailLen);
 }
 

@@ -11,11 +11,23 @@ import * as path from "path";
 import * as os from "os";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 
-/** L4: backpressure-safe SSE writer. Waits for 'drain' when res.write returns false. */
+/** L4: backpressure-safe SSE writer. Waits for 'drain' when res.write returns false.
+ *  Timeout-protected: if drain doesn't fire within 5s (disconnected client),
+ *  the write is abandoned to prevent indefinite hangs. */
 async function writeSSE(res: ServerResponse, chunk: string): Promise<void> {
-  if (res.writableEnded) return;
-  if (!res.write(chunk)) {
-    await new Promise<void>(r => res.once("drain", () => r()));
+  if (res.writableEnded || res.destroyed) return;
+  let ok: boolean;
+  try {
+    ok = res.write(chunk);
+  } catch {
+    return; // socket destroyed between check and write
+  }
+  if (!ok) {
+    await new Promise<void>(r => {
+      const timer = setTimeout(() => { res.removeListener("drain", onDrain); r(); }, 5000);
+      const onDrain = () => { clearTimeout(timer); r(); };
+      res.once("drain", onDrain);
+    });
   }
 }
 import { streamChatEvents, CloudChatError, truncateHeadTail, type ChatHistoryItem, type ToolDef, type ResponseMeta } from "./chat";
