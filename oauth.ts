@@ -116,6 +116,10 @@ export async function registerUser(
 
 const APP_DIR_NAME = "opencode-windsurf-auth";
 const CREDS_FILENAME = "credentials.json";
+const SETTINGS_FILENAME = "settings.json";
+
+export type WindsurfApiFormat = "openai" | "anthropic";
+const DEFAULT_API_FORMAT: WindsurfApiFormat = "openai";
 
 export function getCredentialsDir(): string {
   return path.join(os.homedir(), ".config", APP_DIR_NAME);
@@ -125,9 +129,28 @@ export function getCredentialsPath(): string {
   return path.join(getCredentialsDir(), CREDS_FILENAME);
 }
 
+function getSettingsPath(): string {
+  return path.join(getCredentialsDir(), SETTINGS_FILENAME);
+}
+
 function ensureDir(): void {
   const dir = getCredentialsDir();
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+}
+
+export function loadApiFormat(): WindsurfApiFormat {
+  try {
+    const raw = fs.readFileSync(getSettingsPath(), "utf8");
+    const parsed = JSON.parse(raw) as { apiFormat?: unknown };
+    return parsed.apiFormat === "anthropic" || parsed.apiFormat === "openai" ? parsed.apiFormat : DEFAULT_API_FORMAT;
+  } catch {
+    return DEFAULT_API_FORMAT;
+  }
+}
+
+export function saveApiFormat(apiFormat: WindsurfApiFormat): void {
+  ensureDir();
+  fs.writeFileSync(getSettingsPath(), JSON.stringify({ apiFormat }, null, 2), { mode: 0o600 });
 }
 
 export function loadCredentials(): PersistedCredentials | null {
