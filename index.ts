@@ -764,17 +764,19 @@ export default async function (pi: ExtensionAPI) {
 	// Update status bar with free/promo indicator only.
 	// Pi already shows model + thinking level in its own status area,
 	// so we only show the free/promo badge to avoid duplication.
-	// hasPricing=false → truly free (no per-token billing).
-	// promoActive=true + hasPricing=true → promotional period (likely a discount, not free).
+	// Style: clean, premium feel with subtle color.
+	//   Free  → green (success) — "◇ Free"
+	//   Promo → amber (warning) — "✦ Promo"
+	//   Paid  → cleared
 	async function updateWindsurfStatus(
 		ctx: Parameters<Parameters<typeof _pi.on>[1]>[1],
 		modelId: string,
 		thinkingLevel?: string,
 	) {
 		const promoInfo = await checkFreePromo(modelId, thinkingLevel);
-		if (promoInfo?.free) ctx.ui.setStatus("windsurf", "🆓 Free");
-		else if (promoInfo?.promo) ctx.ui.setStatus("windsurf", "🏷️ Promo");
-		else ctx.ui.setStatus("windsurf", "");
+		if (promoInfo?.free) ctx.ui.setStatus("windsurf", ctx.ui.theme.fg("success", "◇ Free"));
+		else if (promoInfo?.promo) ctx.ui.setStatus("windsurf", ctx.ui.theme.fg("warning", "✦ Promo"));
+		else ctx.ui.setStatus("windsurf", undefined);
 	}
 
 	pi.on("model_select", async (event, ctx) => {
