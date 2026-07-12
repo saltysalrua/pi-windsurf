@@ -256,7 +256,7 @@ function groupedModelToPi(group: GroupedModel) {
 	else if (somePromoPaid) tags.push("Some Promo");
 	if (first.isNew) tags.push("New");
 	if (first.isModelRouter) tags.push("Router");
-	if (group.isFast) tags.push("Fast");
+	// Fast is part of the model name, not a tag — different variant with potentially different pricing
 	const tagStr = tags.length > 0 ? ` [${tags.join(" ")}]` : "";
 	const ctxStr =
 		ctx > 0
@@ -264,7 +264,9 @@ function groupedModelToPi(group: GroupedModel) {
 			: "";
 
 	const f = first.features;
-	const pricing = getPricingForModelUid(group.familyKey);
+	// Fast variants may have different pricing — try familyKey + "-fast" first
+	const pricingKey = group.isFast ? `${group.familyKey}-fast` : group.familyKey;
+	const pricing = getPricingForModelUid(pricingKey);
 
 	// Use the family key as the model id. Pi will send thinkingLevelMap[level]
 	// (the specific UID) when the user selects a thinking level, or the family
@@ -273,7 +275,7 @@ function groupedModelToPi(group: GroupedModel) {
 
 	return {
 		id: modelId,
-		name: `${group.baseLabel}${tagStr}${ctxStr}`,
+		name: `${group.baseLabel}${group.isFast ? " Fast" : ""}${tagStr}${ctxStr}`,
 		reasoning: f?.supportsThinking ?? true,
 		thinkingLevelMap: buildGroupedThinkingLevelMap(group),
 		input: [
