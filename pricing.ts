@@ -163,7 +163,12 @@ const PRICING_TABLE: Record<string, ModelPricing> = {
 	// GPT-5.6 family — three tiers with different prices (OpenAI official API)
 	// Sol = flagship ($5/$30), Terra = balanced ($2.50/$15), Luna = cost ($1/$6)
 	"gpt-5-6-sol": { input: 5.0, cacheRead: 0.5, output: 30.0, cacheWrite: 6.25 },
-	"gpt-5-6-terra": { input: 2.5, cacheRead: 0.25, output: 15.0, cacheWrite: 3.125 },
+	"gpt-5-6-terra": {
+		input: 2.5,
+		cacheRead: 0.25,
+		output: 15.0,
+		cacheWrite: 3.125,
+	},
 	"gpt-5-6-luna": { input: 1.0, cacheRead: 0.1, output: 6.0, cacheWrite: 1.25 },
 	// GPT-5.5
 	"gpt-5-5": { input: 5.0, cacheRead: 0.5, output: 30.0, cacheWrite: 6.25 },
