@@ -761,22 +761,24 @@ export default async function (pi: ExtensionAPI) {
 		}
 	}
 
-	// Update status bar with free/promo indicator only.
-	// Pi already shows model + thinking level in its own status area,
-	// so we only show the free/promo badge to avoid duplication.
+	// Update widget above editor with free/promo indicator.
+	// Using setWidget(aboveEditor) instead of setStatus to avoid crowding
+	// the footer where other extensions compete for space.
 	// Style: clean, premium feel with subtle color.
 	//   Free  → green (success) — "◇ Free"
 	//   Promo → amber (warning) — "✦ Promo"
-	//   Paid  → cleared
+	//   Paid  → cleared (undefined)
 	async function updateWindsurfStatus(
 		ctx: Parameters<Parameters<typeof _pi.on>[1]>[1],
 		modelId: string,
 		thinkingLevel?: string,
 	) {
 		const promoInfo = await checkFreePromo(modelId, thinkingLevel);
-		if (promoInfo?.free) ctx.ui.setStatus("windsurf", ctx.ui.theme.fg("success", "◇ Free"));
-		else if (promoInfo?.promo) ctx.ui.setStatus("windsurf", ctx.ui.theme.fg("warning", "✦ Promo"));
-		else ctx.ui.setStatus("windsurf", undefined);
+		if (promoInfo?.free)
+			ctx.ui.setWidget("windsurf-promo", [ctx.ui.theme.fg("success", "◇ Free")]);
+		else if (promoInfo?.promo)
+			ctx.ui.setWidget("windsurf-promo", [ctx.ui.theme.fg("warning", "✦ Promo")]);
+		else ctx.ui.setWidget("windsurf-promo", undefined);
 	}
 
 	pi.on("model_select", async (event, ctx) => {
