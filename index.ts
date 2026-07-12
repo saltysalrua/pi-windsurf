@@ -93,7 +93,11 @@ interface GroupedModel {
 }
 
 /** Strip thinking-level and fast suffixes from a UID to get the family key. */
-function stripLevelAndFast(uid: string): { familyKey: string; level: ThinkingLevel | "off" | null; isFast: boolean } {
+function stripLevelAndFast(uid: string): {
+	familyKey: string;
+	level: ThinkingLevel | "off" | null;
+	isFast: boolean;
+} {
 	let isFast = false;
 	let work = uid;
 	if (UID_FAST_SUFFIX.test(work)) {
@@ -163,13 +167,25 @@ function groupCatalogEntries(entries: ModelCatalogEntry[]): GroupedModel[] {
 }
 
 /** Build a Pi thinkingLevelMap from a grouped model's level→UID mapping. */
-function buildGroupedThinkingLevelMap(group: GroupedModel): ThinkingLevelMap | undefined {
-	if (group.levelToUid.size <= 1 && !group.levelToUid.has("off")) return undefined;
+function buildGroupedThinkingLevelMap(
+	group: GroupedModel,
+): ThinkingLevelMap | undefined {
+	if (group.levelToUid.size <= 1 && !group.levelToUid.has("off"))
+		return undefined;
 	// If only "off" exists, it's a single-variant model with no thinking selector
-	if (group.levelToUid.size === 1 && group.levelToUid.has("off")) return undefined;
+	if (group.levelToUid.size === 1 && group.levelToUid.has("off"))
+		return undefined;
 
 	const map: ThinkingLevelMap = {};
-	const allLevels: (ThinkingLevel | "off")[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+	const allLevels: (ThinkingLevel | "off")[] = [
+		"off",
+		"minimal",
+		"low",
+		"medium",
+		"high",
+		"xhigh",
+		"max",
+	];
 	for (const lvl of allLevels) {
 		const uid = group.levelToUid.get(lvl);
 		if (uid) {
@@ -665,10 +681,45 @@ export default async function (pi: ExtensionAPI) {
 	);
 
 	// -- show resolved model info in the status bar + emit event --
+	// Check if a model+thinking-level combination is free-promo in the catalog.
+	// Returns { promo: boolean, free: boolean } or null if catalog unavailable.
+	async function checkFreePromo(
+		modelId: string,
+		thinkingLevel: string | undefined,
+	): Promise<{ promo: boolean; free: boolean } | null> {
+		try {
+			const catalog = await getCachedCatalog(_apiKey, _apiServerUrl);
+			if (!catalog) return null;
+			// Resolve modelId + thinkingLevel to a specific catalog UID
+			const { resolveModelName } = await import("./models");
+			const resolved = await resolveModelName(modelId, _apiKey, _apiServerUrl, thinkingLevel);
+			const entry = catalog.byUid.get(resolved.modelUid);
+			if (!entry) return null;
+			return { promo: !!entry.promoActive, free: !entry.hasPricing };
+		} catch {
+			return null;
+		}
+	}
+
+	// Update status bar with model + free-promo indicator
+	async function updateWindsurfStatus(
+		ctx: Parameters<Parameters<typeof _pi.on>[1]>[1],
+		modelId: string,
+		thinkingLevel?: string,
+	) {
+		const levelStr = thinkingLevel ? ` · ${thinkingLevel}` : "";
+		const promoInfo = await checkFreePromo(modelId, thinkingLevel);
+		let suffix = "";
+		if (promoInfo?.promo) suffix = " · 🆓 Free Promo";
+		else if (promoInfo?.free) suffix = " · 🆓 Free";
+		ctx.ui.setStatus("windsurf", `${modelId}${levelStr}${suffix}`);
+	}
+
 	pi.on("model_select", async (event, ctx) => {
 		const m = event.model;
 		if (m?.id && m.provider === "windsurf") {
-			ctx.ui.setStatus("windsurf", m.id);
+			const level = pi.getThinkingLevel();
+			await updateWindsurfStatus(ctx, m.id, level);
 			windsurfEventBus.emit("windsurf:model_select", { modelId: m.id });
 			pi.events.emit("windsurf:model_select", { modelId: m.id });
 		}
@@ -678,7 +729,7 @@ export default async function (pi: ExtensionAPI) {
 	pi.on("thinking_level_select", async (event, ctx) => {
 		if (ctx.model?.provider === "windsurf") {
 			const level = event.level;
-			ctx.ui.setStatus("windsurf", `${ctx.model?.id ?? "?"} · ${level}`);
+			await updateWindsurfStatus(ctx, ctx.model?.id ?? "?", level);
 			windsurfEventBus.emit("windsurf:thinking_level", {
 				level,
 				modelId: ctx.model?.id,
