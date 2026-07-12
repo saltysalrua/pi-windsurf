@@ -10,7 +10,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { OAuthCredentials, OAuthLoginCallbacks, ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { startProxy, stopProxy, PROXY_SECRET, setProxyCredentials, getResponseMeta, serializeResponseMeta, getChildProxyUrl } from "./proxy";
-import { loadCredentials, saveCredentials, deleteCredentials, DEFAULT_REGION, runLoginLoopback, registerUser, type PersistedCredentials } from "./oauth";
+import { loadCredentials, saveCredentials, deleteCredentials, loadApiFormat, saveApiFormat, DEFAULT_REGION, runLoginLoopback, registerUser, type PersistedCredentials, type WindsurfApiFormat } from "./oauth";
 import { clearCachedUserJwt } from "./auth";
 import { clearSessionIds } from "./chat";
 import { clearCachedCatalog, getCachedCatalog, type ModelCatalogEntry, type ModelFeatures } from "./catalog";
@@ -162,41 +162,62 @@ export default async function (pi: ExtensionAPI) {
     ? await fetchDynamicModels(_apiKey, _apiServerUrl)
     : [];
 
-  // Register OpenAI-compatible provider (Pi sends OpenAI format -> /v1/chat/completions)
-  pi.registerProvider("windsurf", {
-    name: "Cognition (Windsurf)",
-    baseUrl, apiKey: providerApiKey, api: "openai-completions", authHeader: true,
-    models,
-    compat: {
-      supportsDeveloperRole: true,        // OpenAI format supports developer role; proxy maps to user (source=1)
-      supportsReasoningEffort: false,
-      maxTokensField: "max_tokens",
-      requiresToolResultName: false,
-      supportsUsageInStreaming: true,
-    },
-    oauth: {
-      name: "Windsurf (Cognition)",
-      login: loginWindsurf,
-      refreshToken: refreshWindsurfToken,
-      getApiKey: (creds: OAuthCredentials) => creds.access,
-      modifyModels: (models) => models,
+  let apiFormat: WindsurfApiFormat = loadApiFormat();
+  const registerWindsurfProvider = (format: WindsurfApiFormat): void => {
+    const isAnthropic = format === "anthropic";
+    pi.registerProvider("windsurf", {
+      name: "Cognition (Windsurf)",
+      baseUrl: isAnthropic ? anthropicBaseUrl : baseUrl,
+      apiKey: providerApiKey,
+      api: isAnthropic ? "anthropic-messages" : "openai-completions",
+      authHeader: true,
+      models,
+      compat: {
+        supportsDeveloperRole: !isAnthropic,
+        supportsReasoningEffort: false,
+        maxTokensField: "max_tokens",
+        requiresToolResultName: false,
+        supportsUsageInStreaming: true,
+      },
+      oauth: {
+        name: "Windsurf (Cognition)",
+        login: loginWindsurf,
+        refreshToken: refreshWindsurfToken,
+        getApiKey: (creds: OAuthCredentials) => creds.access,
+        modifyModels: (models) => models,
+      },
+    });
+  };
+
+  registerWindsurfProvider(apiFormat);
+
+  pi.registerCommand("windsurf-api", {
+    description: "Switch Windsurf API format",
+    handler: async (args, ctx) => {
+      const requested = args.trim();
+      if (!requested) {
+        ctx.ui.notify(`Current: ${apiFormat}. Use /windsurf-api ${apiFormat === "openai" ? "anthropic" : "openai"} to switch.`, "info");
+        return;
+      }
+      if (requested !== "openai" && requested !== "anthropic") {
+        ctx.ui.notify("Usage: /windsurf-api openai|anthropic", "warning");
+        return;
+      }
+      if (requested === apiFormat) {
+        ctx.ui.notify(`Windsurf API format is already ${apiFormat}.`, "info");
+        return;
+      }
+      try {
+        saveApiFormat(requested);
+        apiFormat = requested;
+        pi.unregisterProvider("windsurf");
+        registerWindsurfProvider(apiFormat);
+        ctx.ui.notify(`Windsurf API format switched to ${apiFormat}. If your selected model doesn't switch, restart Pi.`, "info");
+      } catch (error) {
+        ctx.ui.notify(`Failed to switch Windsurf API format: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
     },
   });
-
-  // Register Anthropic Messages provider (Pi sends Anthropic format -> /v1/messages)
-  pi.registerProvider("windsurf-anthropic", {
-    name: "Cognition (Windsurf Anthropic)",
-    baseUrl: anthropicBaseUrl, apiKey: providerApiKey, api: "anthropic-messages", authHeader: true,
-    models,
-    compat: {
-      supportsDeveloperRole: false,
-      supportsReasoningEffort: false,
-      maxTokensField: "max_tokens",
-      requiresToolResultName: false,
-      supportsUsageInStreaming: true,
-    },
-  });
-
 
 
   pi.registerCommand("windsurf-status", {
@@ -234,7 +255,6 @@ export default async function (pi: ExtensionAPI) {
       setProxyCredentials(null);
       clearCachedUserJwt(); clearSessionIds(); clearCachedCatalog(); clearAssignmentCache();
       pi.unregisterProvider("windsurf");
-      pi.unregisterProvider("windsurf-anthropic");
       ctx.ui.notify(ok ? "Windsurf: signed out." : "Already signed out.", "info");
     },
   });
