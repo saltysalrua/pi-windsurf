@@ -78,14 +78,18 @@ const UID_LEVEL_SUFFIXES: [ThinkingLevel | "off", RegExp][] = [
 
 /** Fast/priority suffix — separates normal and fast into distinct Pi models. */
 const UID_FAST_SUFFIX = /-(?:fast|priority)$/;
+/** 1M context suffix — separates 200K and 1M context variants. */
+const UID_1M_SUFFIX = /-1m$/;
 
 interface GroupedModel {
-	/** Family key (UID with level + fast suffixes stripped). */
+	/** Family key (UID with level + fast + 1m suffixes stripped). */
 	familyKey: string;
 	/** Display name without the thinking-level word. */
 	baseLabel: string;
 	/** Whether this is the fast variant. */
 	isFast: boolean;
+	/** Whether this is the 1M context variant. */
+	is1M: boolean;
 	/** Map thinking level → catalog UID. */
 	levelToUid: Map<ThinkingLevel | "off", string>;
 	/** All catalog entries in this group (for metadata aggregation). */
@@ -103,7 +107,7 @@ const LABEL_LEVEL_WORDS: [ThinkingLevel | "off", RegExp][] = [
 	["max", /\bMax\b/i],
 ];
 
-/** Strip thinking-level and fast suffixes from a UID to get the family key.
+/** Strip thinking-level, fast, and 1m suffixes from a UID to get the family key.
  *  If the UID has no level suffix, fall back to the display label to determine the level. */
 function stripLevelAndFast(
 	uid: string,
@@ -112,12 +116,18 @@ function stripLevelAndFast(
 	familyKey: string;
 	level: ThinkingLevel | "off" | null;
 	isFast: boolean;
+	is1M: boolean;
 } {
 	let isFast = false;
+	let is1M = false;
 	let work = uid;
 	if (UID_FAST_SUFFIX.test(work)) {
 		isFast = true;
 		work = work.replace(UID_FAST_SUFFIX, "");
+	}
+	if (UID_1M_SUFFIX.test(work)) {
+		is1M = true;
+		work = work.replace(UID_1M_SUFFIX, "");
 	}
 	let level: ThinkingLevel | "off" | null = null;
 	for (const [lvl, re] of UID_LEVEL_SUFFIXES) {
@@ -138,14 +148,15 @@ function stripLevelAndFast(
 			}
 		}
 	}
-	return { familyKey: work, level, isFast };
+	return { familyKey: work, level, isFast, is1M };
 }
 
-/** Strip the thinking-level word and Fast/Thinking suffixes from a display label.
- *  Order matters: remove "Fast" and "Thinking"/"No Thinking" first (they come
- *  after the level word), then the level words themselves, then "1M". */
+/** Strip the thinking-level word and Fast/Thinking/1M suffixes from a display label.
+ *  Order matters: remove "1M" and "Fast" first (they come after the level word),
+ *  then "Thinking"/"No Thinking", then the level words themselves. */
 function stripLevelFromLabel(label: string): string {
 	return label
+		.replace(/\s+1M$/i, "")
 		.replace(/\s+Fast$/i, "")
 		.replace(/\s+No\s+Thinking$/i, "")
 		.replace(/\s+Thinking$/i, "")
@@ -156,7 +167,6 @@ function stripLevelFromLabel(label: string): string {
 		.replace(/\s+XHigh$/i, "")
 		.replace(/\s+X-High$/i, "")
 		.replace(/\s+Max$/i, "")
-		.replace(/\s+1M$/i, "")
 		.trim();
 }
 
@@ -165,12 +175,12 @@ function groupCatalogEntries(entries: ModelCatalogEntry[]): GroupedModel[] {
 	const groups = new Map<string, GroupedModel>();
 
 	for (const entry of entries) {
-		const { familyKey, level, isFast } = stripLevelAndFast(
+		const { familyKey, level, isFast, is1M } = stripLevelAndFast(
 			entry.modelUid,
 			entry.label,
 		);
 		// For entries with no level suffix (single-variant models), familyKey = uid
-		const groupKey = `${familyKey}__${isFast ? "fast" : "normal"}`;
+		const groupKey = `${familyKey}__${isFast ? "fast" : "normal"}__${is1M ? "1m" : "std"}`;
 
 		let group = groups.get(groupKey);
 		if (!group) {
@@ -178,6 +188,7 @@ function groupCatalogEntries(entries: ModelCatalogEntry[]): GroupedModel[] {
 				familyKey,
 				baseLabel: stripLevelFromLabel(entry.label),
 				isFast,
+				is1M,
 				levelToUid: new Map(),
 				entries: [],
 			};
@@ -264,8 +275,10 @@ function groupedModelToPi(group: GroupedModel) {
 			: "";
 
 	const f = first.features;
-	// Fast variants may have different pricing — try familyKey + "-fast" first
-	const pricingKey = group.isFast ? `${group.familyKey}-fast` : group.familyKey;
+	// Fast/1M variants may have different pricing — try with suffix first
+	let pricingKey = group.familyKey;
+	if (group.isFast) pricingKey = `${pricingKey}-fast`;
+	if (group.is1M) pricingKey = `${pricingKey}-1m`;
 	const pricing = getPricingForModelUid(pricingKey);
 
 	// Use the family key as the model id. Pi will send thinkingLevelMap[level]
@@ -275,7 +288,7 @@ function groupedModelToPi(group: GroupedModel) {
 
 	return {
 		id: modelId,
-		name: `${group.baseLabel}${group.isFast ? " Fast" : ""}${tagStr}${ctxStr}`,
+		name: `${group.baseLabel}${group.is1M ? " 1M" : ""}${group.isFast ? " Fast" : ""}${tagStr}${ctxStr}`,
 		reasoning: f?.supportsThinking ?? true,
 		thinkingLevelMap: buildGroupedThinkingLevelMap(group),
 		input: [
