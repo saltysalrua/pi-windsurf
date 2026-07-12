@@ -281,10 +281,11 @@ function groupedModelToPi(group: GroupedModel) {
 	if (group.is1M) pricingKey = `${pricingKey}-1m`;
 	const pricing = getPricingForModelUid(pricingKey);
 
-	// Use the family key as the model id. Pi will send thinkingLevelMap[level]
-	// (the specific UID) when the user selects a thinking level, or the family
-	// key itself if no level is selected (resolveModelName handles fallback).
-	const modelId = group.familyKey;
+	// Use the family key as the model id, with suffixes for 1M/Fast variants
+	// to keep them unique in Pi's model registry (Pi dedupes by id).
+	let modelId = group.familyKey;
+	if (group.is1M) modelId = `${modelId}-1m`;
+	if (group.isFast) modelId = `${modelId}-fast`;
 
 	return {
 		id: modelId,

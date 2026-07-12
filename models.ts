@@ -124,6 +124,8 @@ function findFamilyEntry(
 /**
  * Find a sibling catalog entry whose label contains the thinking level word.
  * "Sibling" = entries sharing a UID prefix (same model family).
+ * Prefers siblings that share the same variant suffixes (1M, fast/priority)
+ * as the current entry to avoid crossing variant boundaries.
  * Completely data-driven from catalog labels — no hardcoded suffix lists.
  */
 function findSiblingByLevel(
@@ -136,6 +138,10 @@ function findSiblingByLevel(
   if (currentLabelLower.includes(levelWord)) {
     return { uid: currentUid, label: currentLabel };
   }
+  // Detect variant suffixes on the current UID to prefer same-variant siblings
+  const is1M = /-1m$/.test(currentUid);
+  const isFast = /-(?:fast|priority)$/.test(currentUid);
+
   // Search progressively shorter prefixes. Stop only on a label match or when exhausted.
   for (let len = currentUid.length - 1; len > 2; len--) {
     const prefix = currentUid.slice(0, len);
@@ -147,6 +153,14 @@ function findSiblingByLevel(
       }
     }
     if (candidates.length === 0) continue;
+    // Prefer same-variant siblings first
+    const sameVariant = candidates.filter((c) =>
+      (is1M === /-1m$/.test(c.uid)) && (isFast === /-(?:fast|priority)$/.test(c.uid))
+    );
+    for (const c of sameVariant) {
+      if (c.label.toLowerCase().includes(levelWord)) return c;
+    }
+    // Fall back to any sibling
     for (const c of candidates) {
       if (c.label.toLowerCase().includes(levelWord)) return c;
     }
