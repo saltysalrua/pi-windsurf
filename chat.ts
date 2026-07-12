@@ -5,11 +5,11 @@
 import * as crypto from "crypto";
 import * as zlib from "zlib";
 import {
-  encodeMessage,
-  encodeString,
-  encodeVarintField,
-  frameConnectStream,
-  iterFields,
+	encodeMessage,
+	encodeString,
+	encodeVarintField,
+	frameConnectStream,
+	iterFields,
 } from "./wire";
 import { buildMetadata } from "./metadata";
 import { getCachedUserJwt } from "./auth";
@@ -24,63 +24,86 @@ const CLOUD_STREAM_IDLE_MS = 300_000;
 const CLOUD_STREAM_TTFB_MS = 300_000;
 
 export type ContentPart =
-  | { type: "text"; text: string }
-  | { type: "image"; mimeType: string; base64Data: string; caption?: string };
+	| { type: "text"; text: string }
+	| { type: "image"; mimeType: string; base64Data: string; caption?: string };
 
 export interface ChatHistoryItem {
-  role: "user" | "assistant" | "system" | "tool";
-  content: string | ContentPart[];
-  tool_call_id?: string;
-  tool_calls?: Array<{ id: string; name: string; arguments: string }>;
+	role: "user" | "assistant" | "system" | "tool";
+	content: string | ContentPart[];
+	tool_call_id?: string;
+	tool_calls?: Array<{ id: string; name: string; arguments: string }>;
 }
 
 export interface ToolDef {
-  name: string;
-  description: string;
-  parameters: unknown;
+	name: string;
+	description: string;
+	parameters: unknown;
 }
 
 export type CloudChatEvent =
-  | { kind: "text"; text: string }
-  | { kind: "reasoning"; text: string }
-  | { kind: "tool_call_start"; id: string; name: string }
-  | { kind: "tool_call_args"; argsDelta: string; id?: string }
-  | { kind: "finish"; reason: "stop" | "tool_calls" | "length" | "content_filter" }
-  | { kind: "usage"; promptTokens?: number; completionTokens?: number; totalTokens?: number;
-      cachedInputTokens?: number; cacheCreationInputTokens?: number; reasoningTokens?: number; }
-  | { kind: "meta"; fields: ResponseMeta };
+	| { kind: "text"; text: string }
+	| { kind: "reasoning"; text: string }
+	| { kind: "tool_call_start"; id: string; name: string }
+	| { kind: "tool_call_args"; argsDelta: string; id?: string }
+	| {
+			kind: "finish";
+			reason: "stop" | "tool_calls" | "length" | "content_filter";
+	  }
+	| {
+			kind: "usage";
+			promptTokens?: number;
+			completionTokens?: number;
+			totalTokens?: number;
+			cachedInputTokens?: number;
+			cacheCreationInputTokens?: number;
+			reasoningTokens?: number;
+	  }
+	| { kind: "meta"; fields: ResponseMeta };
 
 export interface ResponseMeta {
-  outputId?: string;
-  requestId?: string;
-  timestamp?: { seconds?: number; nanos?: number };
-  phase?: number;
-  actualModelUid?: string;
-  messageId?: string;
-  inputTokens?: number;
-  outputTokens?: number;
-  rawUnknown: Map<number, { wire: number; str?: string; num?: number; bool?: boolean; buf?: Buffer }>;
+	outputId?: string;
+	requestId?: string;
+	timestamp?: { seconds?: number; nanos?: number };
+	phase?: number;
+	actualModelUid?: string;
+	messageId?: string;
+	inputTokens?: number;
+	outputTokens?: number;
+	rawUnknown: Map<
+		number,
+		{ wire: number; str?: string; num?: number; bool?: boolean; buf?: Buffer }
+	>;
 }
 
 export interface CloudChatRequest {
-  apiKey: string;
-  apiServerUrl?: string;
-  modelUid: string;
-  isModelRouter?: boolean;
-  inferenceConfig?: InferenceConfig;
-  messages: ChatHistoryItem[];
-  tools?: ToolDef[];
-  cascadeId?: string;
-  completionOpts?: { maxOutputTokens?: number; maxInputTokens?: number; temperature?: number; topK?: number; topP?: number; };
-  requestType?: number;
-  signal?: AbortSignal;
+	apiKey: string;
+	apiServerUrl?: string;
+	modelUid: string;
+	isModelRouter?: boolean;
+	inferenceConfig?: InferenceConfig;
+	messages: ChatHistoryItem[];
+	tools?: ToolDef[];
+	cascadeId?: string;
+	completionOpts?: {
+		maxOutputTokens?: number;
+		maxInputTokens?: number;
+		temperature?: number;
+		topK?: number;
+		topP?: number;
+	};
+	requestType?: number;
+	signal?: AbortSignal;
 }
 
 export class CloudChatError extends Error {
-  constructor(message: string, public readonly code?: string, public readonly traceId?: string) {
-    super(message);
-    this.name = "CloudChatError";
-  }
+	constructor(
+		message: string,
+		public readonly code?: string,
+		public readonly traceId?: string,
+	) {
+		super(message);
+		this.name = "CloudChatError";
+	}
 }
 
 // ----------------------------------------------------------------------------
@@ -88,251 +111,398 @@ export class CloudChatError extends Error {
 // ----------------------------------------------------------------------------
 
 function anySignal(signals: AbortSignal[]): AbortSignal {
-  const builtin = (AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }).any;
-  if (typeof builtin === "function") return builtin(signals);
-  const controller = new AbortController();
-  const onAbort = (reason: unknown): void => {
-    if (!controller.signal.aborted) controller.abort(reason);
-  };
-  for (const s of signals) {
-    if (s.aborted) { onAbort(s.reason); break; }
-    s.addEventListener("abort", () => onAbort(s.reason), { once: true });
-  }
-  return controller.signal;
+	const builtin = (
+		AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }
+	).any;
+	if (typeof builtin === "function") return builtin(signals);
+	const controller = new AbortController();
+	const onAbort = (reason: unknown): void => {
+		if (!controller.signal.aborted) controller.abort(reason);
+	};
+	for (const s of signals) {
+		if (s.aborted) {
+			onAbort(s.reason);
+			break;
+		}
+		s.addEventListener("abort", () => onAbort(s.reason), { once: true });
+	}
+	return controller.signal;
 }
 
 // Session/cascade ID cache
-interface SessionIds { sessionId: string; cascadeId: string; }
+interface SessionIds {
+	sessionId: string;
+	cascadeId: string;
+}
 const sessionCache = new Map<string, SessionIds>();
 
-function getOrAllocateSessionIds(apiKey: string, host: string, cascadeIdOverride?: string): SessionIds {
-  const key = `${host}\x1f${apiKey}`;
-  let ids = sessionCache.get(key);
-  if (!ids) {
-    ids = { sessionId: crypto.randomUUID(), cascadeId: cascadeIdOverride ?? crypto.randomUUID() };
-    sessionCache.set(key, ids);
-  } else if (cascadeIdOverride && ids.cascadeId !== cascadeIdOverride) {
-    ids = { sessionId: ids.sessionId, cascadeId: cascadeIdOverride };
-    sessionCache.set(key, ids);
-  }
-  return ids;
+function getOrAllocateSessionIds(
+	apiKey: string,
+	host: string,
+	cascadeIdOverride?: string,
+): SessionIds {
+	const key = `${host}\x1f${apiKey}`;
+	let ids = sessionCache.get(key);
+	if (!ids) {
+		ids = {
+			sessionId: crypto.randomUUID(),
+			cascadeId: cascadeIdOverride ?? crypto.randomUUID(),
+		};
+		sessionCache.set(key, ids);
+	} else if (cascadeIdOverride && ids.cascadeId !== cascadeIdOverride) {
+		ids = { sessionId: ids.sessionId, cascadeId: cascadeIdOverride };
+		sessionCache.set(key, ids);
+	}
+	return ids;
 }
 
-export function clearSessionIds(): void { sessionCache.clear(); clearAssignmentCache(); }
+export function clearSessionIds(): void {
+	sessionCache.clear();
+	clearAssignmentCache();
+}
 
 // ----------------------------------------------------------------------------
 // Content normalization
 // ----------------------------------------------------------------------------
 
-function normalizeContent(content: string | ContentPart[] | unknown): ContentPart[] {
-  if (typeof content === "string") return [{ type: "text", text: content }];
-  if (!Array.isArray(content)) return [];
-  const out: ContentPart[] = [];
-  const parts = content as Array<Record<string, unknown>>;
-  for (const p of parts) {
-    if (!p || typeof p !== "object") continue;
-    if (p.type === "text" && typeof p.text === "string") {
-      out.push({ type: "text", text: p.text });
-    } else if (p.type === "image" && typeof p.base64Data === "string") {
-      out.push({ type: "image", mimeType: (typeof p.mimeType === "string" ? p.mimeType : "image/png"), base64Data: p.base64Data, caption: typeof p.caption === "string" ? p.caption : undefined });
-    } else if (p.type === "image_url" && p.image_url) {
-      const imgRef = p.image_url as string | { url?: string };
-      const url: string = typeof imgRef === "string" ? imgRef : (imgRef.url ?? "");
-      const m = url.match(/^data:([^;]+);base64,(.+)$/);
-      if (m) out.push({ type: "image", mimeType: m[1], base64Data: m[2] });
-      else if (url) out.push({ type: "text", text: `[image url: ${url}]` });
-    }
-  }
-  return out;
+function normalizeContent(
+	content: string | ContentPart[] | unknown,
+): ContentPart[] {
+	if (typeof content === "string") return [{ type: "text", text: content }];
+	if (!Array.isArray(content)) return [];
+	const out: ContentPart[] = [];
+	const parts = content as Array<Record<string, unknown>>;
+	for (const p of parts) {
+		if (!p || typeof p !== "object") continue;
+		if (p.type === "text" && typeof p.text === "string") {
+			out.push({ type: "text", text: p.text });
+		} else if (p.type === "image" && typeof p.base64Data === "string") {
+			out.push({
+				type: "image",
+				mimeType: typeof p.mimeType === "string" ? p.mimeType : "image/png",
+				base64Data: p.base64Data,
+				caption: typeof p.caption === "string" ? p.caption : undefined,
+			});
+		} else if (p.type === "image_url" && p.image_url) {
+			const imgRef = p.image_url as string | { url?: string };
+			const url: string =
+				typeof imgRef === "string" ? imgRef : (imgRef.url ?? "");
+			const m = url.match(/^data:([^;]+);base64,(.+)$/);
+			if (m) out.push({ type: "image", mimeType: m[1], base64Data: m[2] });
+			else if (url) out.push({ type: "text", text: `[image url: ${url}]` });
+		}
+	}
+	return out;
 }
 
 /**
  * Separate system messages from conversation messages.
- * System messages stay as source=1 (user role) — the Windsurf backend has no
- * separate system role. But they are NOT merged into user content.
- * Returns the separated messages and the total token estimate of system prefix.
+ *
+ * System text is extracted into a single concatenated string for the dedicated
+ * #2 system_prompt field (verified from dwgx/WindsurfAPI live captures: the
+ * real client sends system as top-level field #2, NOT as a #3 source=1 message).
+ * Conversation messages (user/assistant/tool) are returned for #3 encoding.
+ *
+ * Claude-family upstream rejects a tool-carrying request with an empty/absent
+ * system prompt (#2); gpt/swe tolerate it. The caller is responsible for
+ * injecting a fallback system when tools are present and systemText is empty.
  */
-function separateSystemMessages(messages: ChatHistoryItem[]): { messages: ChatHistoryItem[]; systemPrefixLen: number } {
-  const systemTexts: string[] = [];
-  const conversation: ChatHistoryItem[] = [];
+function separateSystemMessages(messages: ChatHistoryItem[]): {
+	messages: ChatHistoryItem[];
+	systemText: string;
+} {
+	const systemTexts: string[] = [];
+	const conversation: ChatHistoryItem[] = [];
 
-  for (const m of messages) {
-    if (m.role === "system") {
-      const parts = normalizeContent(m.content);
-      const text = parts.filter((p): p is { type: "text"; text: string } => p.type === "text").map(p => p.text).join("\n");
-      if (text) systemTexts.push(text);
-    } else {
-      conversation.push(m);
-    }
-  }
+	for (const m of messages) {
+		if (m.role === "system") {
+			const parts = normalizeContent(m.content);
+			const text = parts
+				.filter((p): p is { type: "text"; text: string } => p.type === "text")
+				.map((p) => p.text)
+				.join("\n");
+			if (text) systemTexts.push(text);
+		} else {
+			conversation.push(m);
+		}
+	}
 
-  // Prepend system messages as source=1 entries (what the binary does)
-  const systemItems: ChatHistoryItem[] = systemTexts.map(text => ({
-    role: "system" as const,
-    content: text,
-  }));
-
-  // Token estimate: ~4 chars per token (same heuristic as encodeChatMessagePrompt field 4)
-  const systemPrefixLen = systemTexts.reduce((sum, text) => sum + Math.max(1, Math.floor(text.length / 4)), 0);
-
-  return { messages: [...systemItems, ...conversation], systemPrefixLen };
+	const systemText = systemTexts.join("\n");
+	return { messages: conversation, systemText };
 }
 
 // ----------------------------------------------------------------------------
 // Proto encoders
 // ----------------------------------------------------------------------------
 
+/**
+ * Tool-description length caps.
+ *
+ * Claude-family upstream returns "an internal error occurred" when a tool's
+ * description crosses a cumulative content/complexity threshold (~500 chars
+ * per description, verified live by dwgx/WindsurfAPI). gpt/swe-family tolerate
+ * much longer descriptions. We cap Claude-family descriptions aggressively
+ * and leave gpt/swe at the generous 6998 limit.
+ */
 const MAX_TOOL_DESC_LEN = 6998;
+const CLAUDE_TOOL_DESC_MAX = 500;
 
 /** L4: head+tail truncation preserving closing structure (JSON braces, markdown fences).
  *  75% head (opening structure + bulk) + 25% tail (closing fences/headings/lists).
  *  No truncation when value fits — 100% of real outputs pass through unchanged.
  *  Surrogate-safe: adjusts boundaries to avoid splitting UTF-16 surrogate pairs. */
-export function truncateHeadTail(value: string, maxLen: number, marker: string): string {
-  if (value.length <= maxLen) return value;
-  // Guard: if marker alone exceeds maxLen, return marker truncated to maxLen.
-  if (marker.length >= maxLen) return marker.slice(0, maxLen);
-  const budget = maxLen - marker.length;
-  let headLen = Math.ceil(budget * 0.75);
-  let tailLen = budget - headLen;
-  // Surrogate-safe head boundary: slice(0, headLen) includes indices 0..headLen-1.
-  // If s[headLen-1] is a high surrogate, the last included char starts a split pair.
-  // Back up so the head ends on a complete code point.
-  if (headLen > 0 && headLen < value.length) {
-    const lastInHead = value.charCodeAt(headLen - 1);
-    if (lastInHead >= 0xD800 && lastInHead <= 0xDBFF) headLen--;
-  }
-  // Surrogate-safe tail boundary: slice(value.length - tailLen) starts at tailStart.
-  // If s[tailStart] is a low surrogate, the first included char is the second half
-  // of a split pair. Advance so the tail starts on a complete code point.
-  if (tailLen > 0 && tailLen < value.length) {
-    const tailStart = value.length - tailLen;
-    const firstInTail = value.charCodeAt(tailStart);
-    if (firstInTail >= 0xDC00 && firstInTail <= 0xDFFF) tailLen--;
-  }
-  return value.slice(0, headLen) + marker + value.slice(value.length - tailLen);
+export function truncateHeadTail(
+	value: string,
+	maxLen: number,
+	marker: string,
+): string {
+	if (value.length <= maxLen) return value;
+	// Guard: if marker alone exceeds maxLen, return marker truncated to maxLen.
+	if (marker.length >= maxLen) return marker.slice(0, maxLen);
+	const budget = maxLen - marker.length;
+	let headLen = Math.ceil(budget * 0.75);
+	let tailLen = budget - headLen;
+	// Surrogate-safe head boundary: slice(0, headLen) includes indices 0..headLen-1.
+	// If s[headLen-1] is a high surrogate, the last included char starts a split pair.
+	// Back up so the head ends on a complete code point.
+	if (headLen > 0 && headLen < value.length) {
+		const lastInHead = value.charCodeAt(headLen - 1);
+		if (lastInHead >= 0xd800 && lastInHead <= 0xdbff) headLen--;
+	}
+	// Surrogate-safe tail boundary: slice(value.length - tailLen) starts at tailStart.
+	// If s[tailStart] is a low surrogate, the first included char is the second half
+	// of a split pair. Advance so the tail starts on a complete code point.
+	if (tailLen > 0 && tailLen < value.length) {
+		const tailStart = value.length - tailLen;
+		const firstInTail = value.charCodeAt(tailStart);
+		if (firstInTail >= 0xdc00 && firstInTail <= 0xdfff) tailLen--;
+	}
+	return value.slice(0, headLen) + marker + value.slice(value.length - tailLen);
 }
 
-function encodeToolDef(tool: ToolDef): Buffer {
-  const rawDesc = tool.description ?? "";
-  const desc = truncateHeadTail(rawDesc, MAX_TOOL_DESC_LEN, "\n…(truncated)…\n");
-  return Buffer.concat([
-    encodeString(1, tool.name),
-    encodeString(2, desc),
-    encodeString(3, JSON.stringify(tool.parameters ?? {})),
-  ]);
+function encodeToolDef(tool: ToolDef, isClaudeFamily: boolean): Buffer {
+	const rawDesc = tool.description ?? "";
+	const cap = isClaudeFamily ? CLAUDE_TOOL_DESC_MAX : MAX_TOOL_DESC_LEN;
+	const desc = truncateHeadTail(rawDesc, cap, "\n…(truncated)…\n");
+	return Buffer.concat([
+		encodeString(1, tool.name),
+		encodeString(2, desc),
+		encodeString(3, JSON.stringify(tool.parameters ?? {})),
+	]);
 }
 
-function encodeImageData(img: { mimeType: string; base64Data: string; caption?: string }): Buffer {
-  const parts: Buffer[] = [encodeString(1, img.base64Data), encodeString(2, img.mimeType)];
-  if (img.caption) parts.push(encodeString(3, img.caption));
-  return Buffer.concat(parts);
+function encodeImageData(img: {
+	mimeType: string;
+	base64Data: string;
+	caption?: string;
+}): Buffer {
+	const parts: Buffer[] = [
+		encodeString(1, img.base64Data),
+		encodeString(2, img.mimeType),
+	];
+	if (img.caption) parts.push(encodeString(3, img.caption));
+	return Buffer.concat(parts);
 }
 
-function encodeChatToolCall(tc: { id: string; name: string; arguments: string }): Buffer {
-  return Buffer.concat([encodeString(1, tc.id), encodeString(2, tc.name), encodeString(3, tc.arguments)]);
+function encodeChatToolCall(tc: {
+	id: string;
+	name: string;
+	arguments: string;
+}): Buffer {
+	return Buffer.concat([
+		encodeString(1, tc.id),
+		encodeString(2, tc.name),
+		encodeString(3, tc.arguments),
+	]);
 }
 
 function encodeChatMessagePrompt(
-  content: ContentPart[],
-  source: number,
-  opts?: { toolCallId?: string; toolCalls?: Array<{ id: string; name: string; arguments: string }> },
+	content: ContentPart[],
+	source: number,
+	opts?: {
+		toolCallId?: string;
+		toolCalls?: Array<{ id: string; name: string; arguments: string }>;
+	},
 ): Buffer {
-  const textParts = content.filter((p): p is { type: "text"; text: string } => p.type === "text");
-  const imageParts = content.filter((p): p is { type: "image"; mimeType: string; base64Data: string; caption?: string } => p.type === "image");
-  const joined = textParts.map(p => p.text).join("\n");
-  const parts: Buffer[] = [
-    encodeVarintField(2, source),
-    encodeString(3, joined),
-    encodeVarintField(4, Math.max(1, Math.floor(joined.length / 4))),
-    encodeVarintField(5, 1),
-  ];
-  if (opts?.toolCallId) parts.push(encodeString(7, opts.toolCallId));
-  if (opts?.toolCalls && opts.toolCalls.length > 0) {
-    for (const tc of opts.toolCalls) parts.push(encodeMessage(6, encodeChatToolCall(tc)));
-  }
-  for (const img of imageParts) parts.push(encodeMessage(10, encodeImageData(img)));
-  return Buffer.concat(parts);
+	const textParts = content.filter(
+		(p): p is { type: "text"; text: string } => p.type === "text",
+	);
+	const imageParts = content.filter(
+		(
+			p,
+		): p is {
+			type: "image";
+			mimeType: string;
+			base64Data: string;
+			caption?: string;
+		} => p.type === "image",
+	);
+	const joined = textParts.map((p) => p.text).join("\n");
+	const parts: Buffer[] = [
+		encodeVarintField(2, source),
+		encodeString(3, joined),
+		encodeVarintField(4, Math.max(1, Math.floor(joined.length / 4))),
+		encodeVarintField(5, 1),
+	];
+	if (opts?.toolCallId) parts.push(encodeString(7, opts.toolCallId));
+	if (opts?.toolCalls && opts.toolCalls.length > 0) {
+		for (const tc of opts.toolCalls)
+			parts.push(encodeMessage(6, encodeChatToolCall(tc)));
+	}
+	for (const img of imageParts)
+		parts.push(encodeMessage(10, encodeImageData(img)));
+	return Buffer.concat(parts);
 }
 
-const SOURCE_BY_ROLE: Record<string, number> = { user: 1, assistant: 2, system: 1, developer: 1, tool: 4 };
+const SOURCE_BY_ROLE: Record<string, number> = {
+	user: 1,
+	assistant: 2,
+	system: 1,
+	developer: 1,
+	tool: 4,
+};
 
-function encodeCompletionConfiguration(opts: {
-  maxOutputTokens?: number; maxInputTokens?: number; temperature?: number; topK?: number; topP?: number;
-}, inferenceConfig?: InferenceConfig): Buffer {
-  const enc64 = (fieldNum: number, n: number): Buffer => {
-    const b = Buffer.alloc(8);
-    b.writeDoubleLE(n, 0);
-    return Buffer.concat([Buffer.from([(fieldNum << 3) | 1]), b]);
-  };
-  const parts: Buffer[] = [
-    encodeVarintField(1, 1),
-    encodeVarintField(2, opts.maxInputTokens ?? 64000),
-    encodeVarintField(3, opts.maxOutputTokens ?? 128_000),
-    enc64(5, opts.temperature ?? 0.7),
-    enc64(6, opts.topP ?? 0.95),
-    encodeVarintField(7, opts.topK ?? 50),
-    enc64(8, 1.0),
-    enc64(11, 1.0),
-  ];
+function encodeCompletionConfiguration(
+	opts: {
+		maxOutputTokens?: number;
+		maxInputTokens?: number;
+		temperature?: number;
+		topK?: number;
+		topP?: number;
+	},
+	inferenceConfig?: InferenceConfig,
+): Buffer {
+	const enc64 = (fieldNum: number, n: number): Buffer => {
+		const b = Buffer.alloc(8);
+		b.writeDoubleLE(n, 0);
+		return Buffer.concat([Buffer.from([(fieldNum << 3) | 1]), b]);
+	};
+	const parts: Buffer[] = [
+		encodeVarintField(1, 1),
+		encodeVarintField(2, opts.maxInputTokens ?? 64000),
+		encodeVarintField(3, opts.maxOutputTokens ?? 128_000),
+		enc64(5, opts.temperature ?? 0.7),
+		enc64(6, opts.topP ?? 0.95),
+		encodeVarintField(7, opts.topK ?? 50),
+		enc64(8, 1.0),
+		enc64(11, 1.0),
+	];
 
-  // Encode per-provider InferenceConfig as a sub-message on field 9
-  if (inferenceConfig) {
-    parts.push(encodeMessage(9, encodeInferenceConfigBody(inferenceConfig)));
-  }
+	// Encode per-provider InferenceConfig as a sub-message on field 9
+	if (inferenceConfig) {
+		parts.push(encodeMessage(9, encodeInferenceConfigBody(inferenceConfig)));
+	}
 
-  return Buffer.concat(parts);
+	return Buffer.concat(parts);
 }
 
 function encodeInferenceConfigBody(cfg: InferenceConfig): Buffer {
-  // Generic encoding: variant is the oneof field number, fields are raw proto fields.
-  const subParts: Buffer[] = [];
-  for (const [fieldNum, field] of cfg.fields) {
-    if (field.wire === 0) {
-      subParts.push(encodeVarintField(fieldNum, field.bool ? 1 : (field.num ?? 0)));
-    } else if (field.wire === 2 && field.str !== undefined) {
-      subParts.push(encodeString(fieldNum, field.str));
-    }
-  }
-  // Wrap in the oneof variant field number
-  return encodeMessage(cfg.variant, Buffer.concat(subParts));
+	// Generic encoding: variant is the oneof field number, fields are raw proto fields.
+	const subParts: Buffer[] = [];
+	for (const [fieldNum, field] of cfg.fields) {
+		if (field.wire === 0) {
+			subParts.push(
+				encodeVarintField(fieldNum, field.bool ? 1 : (field.num ?? 0)),
+			);
+		} else if (field.wire === 2 && field.str !== undefined) {
+			subParts.push(encodeString(fieldNum, field.str));
+		}
+	}
+	// Wrap in the oneof variant field number
+	return encodeMessage(cfg.variant, Buffer.concat(subParts));
 }
 
 interface BuildArgs {
-  apiKey: string; userJwt: string; assignmentJwt?: string; modelUid: string; messages: ChatHistoryItem[];
-  cascadeId: string; promptId: string; sessionId: string; requestId: bigint; triggerId: string;
-  tools?: ToolDef[]; requestType?: number;
-  completionOpts?: { maxOutputTokens?: number; maxInputTokens?: number; temperature?: number; topK?: number; topP?: number; };
-  inferenceConfig?: InferenceConfig;
-  systemPrefixLen?: number;
+	apiKey: string;
+	userJwt: string;
+	assignmentJwt?: string;
+	modelUid: string;
+	messages: ChatHistoryItem[];
+	cascadeId: string;
+	promptId: string;
+	sessionId: string;
+	requestId: bigint;
+	triggerId: string;
+	tools?: ToolDef[];
+	requestType?: number;
+	completionOpts?: {
+		maxOutputTokens?: number;
+		maxInputTokens?: number;
+		temperature?: number;
+		topK?: number;
+		topP?: number;
+	};
+	inferenceConfig?: InferenceConfig;
+	isClaudeFamily: boolean;
 }
 
 function buildGetChatMessageRequest(args: BuildArgs): Buffer {
-  const metadata = buildMetadata({
-    apiKey: args.apiKey, userJwt: args.userJwt, assignmentJwt: args.assignmentJwt,
-    sessionId: args.sessionId, requestId: args.requestId, triggerId: args.triggerId,
-  });
-  const { messages: separated, systemPrefixLen } = separateSystemMessages(args.messages);
-  const promptParts = separated.map((m) =>
-    encodeMessage(3, encodeChatMessagePrompt(
-      normalizeContent(m.content),
-      SOURCE_BY_ROLE[m.role] ?? 1,
-      { toolCallId: m.role === "tool" ? m.tool_call_id : undefined, toolCalls: m.role === "assistant" ? m.tool_calls : undefined },
-    )),
-  );
-  const completion = encodeCompletionConfiguration(args.completionOpts ?? {}, args.inferenceConfig);
-  const toolParts: Buffer[] = (args.tools ?? []).map((t) => encodeMessage(10, encodeToolDef(t)));
-  return Buffer.concat([
-    encodeMessage(1, metadata),
-    ...promptParts,
-    encodeVarintField(7, args.requestType ?? 5),
-    encodeMessage(8, completion),
-    ...toolParts,
-    encodeString(16, args.cascadeId),
-    encodeString(21, args.modelUid),
-    encodeString(22, args.promptId),
-    ...(systemPrefixLen > 0 ? [encodeVarintField(11, systemPrefixLen)] : []),
-  ]);
+	const metadata = buildMetadata({
+		apiKey: args.apiKey,
+		userJwt: args.userJwt,
+		assignmentJwt: args.assignmentJwt,
+		sessionId: args.sessionId,
+		requestId: args.requestId,
+		triggerId: args.triggerId,
+	});
+	const { messages: conversation, systemText: rawSystemText } =
+		separateSystemMessages(args.messages);
+
+	// Claude-family upstream rejects a tool-carrying request that has an
+	// empty/absent system prompt (#2) with "an internal error occurred (trace
+	// ID ...)". gpt/swe families tolerate an empty system. When tools are
+	// present and no system prompt was provided, inject a minimal benign one so
+	// the request stays well-formed for every model family. A single character
+	// of system is enough (verified live by dwgx/WindsurfAPI).
+	let systemText = rawSystemText;
+	if (!systemText && (args.tools?.length ?? 0) > 0) {
+		systemText =
+			"You are a helpful assistant. Use the available tools when appropriate.";
+	}
+
+	const promptParts = conversation.map((m) =>
+		encodeMessage(
+			3,
+			encodeChatMessagePrompt(
+				normalizeContent(m.content),
+				SOURCE_BY_ROLE[m.role] ?? 1,
+				{
+					toolCallId: m.role === "tool" ? m.tool_call_id : undefined,
+					toolCalls: m.role === "assistant" ? m.tool_calls : undefined,
+				},
+			),
+		),
+	);
+	const completion = encodeCompletionConfiguration(
+		args.completionOpts ?? {},
+		args.inferenceConfig,
+	);
+	const toolParts: Buffer[] = (args.tools ?? []).map((t) =>
+		encodeMessage(10, encodeToolDef(t, args.isClaudeFamily)),
+	);
+
+	// ModelConfig (#15) — verified from dwgx/WindsurfAPI live captures:
+	//   #15.1 = per-session config UUID, #15.2 = monotonic turn counter (1 for
+	//   stateless turn-1), #15.3 = 4 (constant).
+	const modelConfig = Buffer.concat([
+		encodeString(1, crypto.randomUUID()),
+		encodeVarintField(2, 1),
+		encodeVarintField(3, 4),
+	]);
+
+	return Buffer.concat([
+		encodeMessage(1, metadata),
+		...(systemText ? [encodeString(2, systemText)] : []),
+		...promptParts,
+		encodeVarintField(7, args.requestType ?? 5),
+		encodeMessage(8, completion),
+		...toolParts,
+		encodeMessage(15, modelConfig),
+		encodeString(16, args.cascadeId),
+		encodeVarintField(20, 1),
+		encodeString(21, args.modelUid),
+		encodeString(22, args.promptId),
+	]);
 }
 
 // ----------------------------------------------------------------------------
@@ -340,112 +510,149 @@ function buildGetChatMessageRequest(args: BuildArgs): Buffer {
 // ----------------------------------------------------------------------------
 
 function* decodeChatFrame(proto: Buffer): Generator<CloudChatEvent> {
-  const meta: ResponseMeta = { rawUnknown: new Map() };
-  let hasMeta = false;
+	const meta: ResponseMeta = { rawUnknown: new Map() };
+	let hasMeta = false;
 
-  for (const f of iterFields(proto)) {
-    if (f.num === 3 && f.wire === 2 && Buffer.isBuffer(f.value)) {
-      const s = (f.value as Buffer).toString("utf8");
-      if (s) yield { kind: "text", text: s };
-    } else if (f.num === 9 && f.wire === 2 && Buffer.isBuffer(f.value)) {
-      const s = (f.value as Buffer).toString("utf8");
-      if (s) yield { kind: "reasoning", text: s };
-    } else if (f.num === 6 && f.wire === 2 && Buffer.isBuffer(f.value)) {
-      let id: string | undefined;
-      let name: string | undefined;
-      let argsDelta: string | undefined;
-      for (const sf of iterFields(f.value as Buffer)) {
-        if (sf.wire === 2 && Buffer.isBuffer(sf.value)) {
-          const s = (sf.value as Buffer).toString("utf8");
-          if (sf.num === 1) id = s;
-          else if (sf.num === 2) name = s;
-          else if (sf.num === 3) argsDelta = s;
-        }
-      }
-      if (id !== undefined && name !== undefined) yield { kind: "tool_call_start", id, name };
-      if (argsDelta !== undefined) yield { kind: "tool_call_args", argsDelta, ...(id !== undefined ? { id } : {}) };
-    } else if (f.num === 5 && f.wire === 0) {
-      const v = Number(f.value);
-      let reason: "stop" | "tool_calls" | "length" | "content_filter" = "stop";
-      if (v === 10) reason = "tool_calls";
-      else if (v === 11) reason = "content_filter";
-      else if (v === 1 || v === 3) reason = "length";
-      yield { kind: "finish", reason };
-    } else if (f.num === 28 && f.wire === 2 && Buffer.isBuffer(f.value)) {
-      const usage = decodeUsageBlock(f.value as Buffer);
-      if (usage) yield usage;
-    } else {
-      // Capture identified fields by proto field number
-      hasMeta = true;
-      if (f.num === 1 && f.wire === 2 && Buffer.isBuffer(f.value)) {
-        meta.outputId = (f.value as Buffer).toString("utf8");
-      } else if (f.num === 2 && f.wire === 2 && Buffer.isBuffer(f.value)) {
-        // Timestamp sub-message: field 1 = seconds, field 2 = nanos
-        for (const sf of iterFields(f.value as Buffer)) {
-          if (sf.num === 1 && sf.wire === 0) meta.timestamp = { ...meta.timestamp, seconds: Number(sf.value) };
-          else if (sf.num === 2 && sf.wire === 0) meta.timestamp = { ...meta.timestamp, nanos: Number(sf.value) };
-        }
-      } else if (f.num === 4 && f.wire === 0) {
-        meta.phase = Number(f.value);
-      } else if (f.num === 7 && f.wire === 2 && Buffer.isBuffer(f.value)) {
-        // completion_profile sub-message
-        for (const sf of iterFields(f.value as Buffer)) {
-          if (sf.num === 2 && sf.wire === 0) meta.inputTokens = Number(sf.value);
-          else if (sf.num === 3 && sf.wire === 0) meta.outputTokens = Number(sf.value);
-          else if (sf.num === 7 && sf.wire === 2 && Buffer.isBuffer(sf.value)) meta.messageId = (sf.value as Buffer).toString("utf8");
-          else if (sf.num === 9 && sf.wire === 2 && Buffer.isBuffer(sf.value)) meta.actualModelUid = (sf.value as Buffer).toString("utf8");
-        }
-      } else if (f.num === 17 && f.wire === 2 && Buffer.isBuffer(f.value)) {
-        meta.requestId = (f.value as Buffer).toString("utf8");
-      } else {
-        // Store remaining unknown fields generically
-        if (f.wire === 2 && Buffer.isBuffer(f.value)) {
-          meta.rawUnknown.set(f.num, { wire: f.wire, buf: f.value as Buffer });
-        } else if (f.wire === 0) {
-          const v = Number(f.value);
-          meta.rawUnknown.set(f.num, { wire: f.wire, num: v, bool: v === 0 || v === 1 ? v === 1 : undefined });
-        }
-      }
-    }
-  }
+	for (const f of iterFields(proto)) {
+		if (f.num === 3 && f.wire === 2 && Buffer.isBuffer(f.value)) {
+			const s = (f.value as Buffer).toString("utf8");
+			if (s) yield { kind: "text", text: s };
+		} else if (f.num === 9 && f.wire === 2 && Buffer.isBuffer(f.value)) {
+			const s = (f.value as Buffer).toString("utf8");
+			if (s) yield { kind: "reasoning", text: s };
+		} else if (f.num === 6 && f.wire === 2 && Buffer.isBuffer(f.value)) {
+			let id: string | undefined;
+			let name: string | undefined;
+			let argsDelta: string | undefined;
+			for (const sf of iterFields(f.value as Buffer)) {
+				if (sf.wire === 2 && Buffer.isBuffer(sf.value)) {
+					const s = (sf.value as Buffer).toString("utf8");
+					if (sf.num === 1) id = s;
+					else if (sf.num === 2) name = s;
+					else if (sf.num === 3) argsDelta = s;
+				}
+			}
+			if (id !== undefined && name !== undefined)
+				yield { kind: "tool_call_start", id, name };
+			if (argsDelta !== undefined)
+				yield {
+					kind: "tool_call_args",
+					argsDelta,
+					...(id !== undefined ? { id } : {}),
+				};
+		} else if (f.num === 5 && f.wire === 0) {
+			const v = Number(f.value);
+			let reason: "stop" | "tool_calls" | "length" | "content_filter" = "stop";
+			if (v === 10) reason = "tool_calls";
+			else if (v === 11) reason = "content_filter";
+			else if (v === 1 || v === 3) reason = "length";
+			yield { kind: "finish", reason };
+		} else if (f.num === 28 && f.wire === 2 && Buffer.isBuffer(f.value)) {
+			const usage = decodeUsageBlock(f.value as Buffer);
+			if (usage) yield usage;
+		} else {
+			// Capture identified fields by proto field number
+			hasMeta = true;
+			if (f.num === 1 && f.wire === 2 && Buffer.isBuffer(f.value)) {
+				meta.outputId = (f.value as Buffer).toString("utf8");
+			} else if (f.num === 2 && f.wire === 2 && Buffer.isBuffer(f.value)) {
+				// Timestamp sub-message: field 1 = seconds, field 2 = nanos
+				for (const sf of iterFields(f.value as Buffer)) {
+					if (sf.num === 1 && sf.wire === 0)
+						meta.timestamp = { ...meta.timestamp, seconds: Number(sf.value) };
+					else if (sf.num === 2 && sf.wire === 0)
+						meta.timestamp = { ...meta.timestamp, nanos: Number(sf.value) };
+				}
+			} else if (f.num === 4 && f.wire === 0) {
+				meta.phase = Number(f.value);
+			} else if (f.num === 7 && f.wire === 2 && Buffer.isBuffer(f.value)) {
+				// completion_profile sub-message
+				for (const sf of iterFields(f.value as Buffer)) {
+					if (sf.num === 2 && sf.wire === 0)
+						meta.inputTokens = Number(sf.value);
+					else if (sf.num === 3 && sf.wire === 0)
+						meta.outputTokens = Number(sf.value);
+					else if (sf.num === 7 && sf.wire === 2 && Buffer.isBuffer(sf.value))
+						meta.messageId = (sf.value as Buffer).toString("utf8");
+					else if (sf.num === 9 && sf.wire === 2 && Buffer.isBuffer(sf.value))
+						meta.actualModelUid = (sf.value as Buffer).toString("utf8");
+				}
+			} else if (f.num === 17 && f.wire === 2 && Buffer.isBuffer(f.value)) {
+				meta.requestId = (f.value as Buffer).toString("utf8");
+			} else {
+				// Store remaining unknown fields generically
+				if (f.wire === 2 && Buffer.isBuffer(f.value)) {
+					meta.rawUnknown.set(f.num, { wire: f.wire, buf: f.value as Buffer });
+				} else if (f.wire === 0) {
+					const v = Number(f.value);
+					meta.rawUnknown.set(f.num, {
+						wire: f.wire,
+						num: v,
+						bool: v === 0 || v === 1 ? v === 1 : undefined,
+					});
+				}
+			}
+		}
+	}
 
-  if (hasMeta) yield { kind: "meta", fields: meta };
+	if (hasMeta) yield { kind: "meta", fields: meta };
 }
 
 function decodeUsageBlock(buf: Buffer): CloudChatEvent | null {
-  let promptTokens: number | undefined;
-  let completionTokens: number | undefined;
-  let cachedInputTokens: number | undefined;
-  let cacheCreationInputTokens: number | undefined;
-  let reasoningTokens: number | undefined;
+	let promptTokens: number | undefined;
+	let completionTokens: number | undefined;
+	let cachedInputTokens: number | undefined;
+	let cacheCreationInputTokens: number | undefined;
+	let reasoningTokens: number | undefined;
 
-  for (const f of iterFields(buf)) {
-    if (f.num !== 2 || f.wire !== 2 || !Buffer.isBuffer(f.value)) continue;
-    let entryMetric: string | undefined;
-    let entryValue: number | undefined;
-    for (const sf of iterFields(f.value as Buffer)) {
-      if (sf.num === 5 && sf.wire === 2 && Buffer.isBuffer(sf.value)) {
-        entryMetric = (sf.value as Buffer).toString("utf8");
-      } else if (sf.num === 4 && sf.wire === 2 && Buffer.isBuffer(sf.value)) {
-        for (const ssf of iterFields(sf.value as Buffer)) {
-          if (ssf.num === 2 && ssf.wire === 5 && Buffer.isBuffer(ssf.value)) {
-            entryValue = (ssf.value as Buffer).readFloatLE(0);
-            break;
-          }
-        }
-      }
-    }
-    if (entryMetric && entryValue !== undefined && Number.isFinite(entryValue)) {
-      const n = Math.round(entryValue);
-      if (entryMetric === "input_tokens") promptTokens = n;
-      else if (entryMetric === "output_tokens") completionTokens = n;
-      else if (entryMetric === "cached_input_tokens" || entryMetric === "cache_read_input_tokens") cachedInputTokens = (cachedInputTokens ?? 0) + n;
-      else if (entryMetric === "cache_creation_input_tokens") cacheCreationInputTokens = (cacheCreationInputTokens ?? 0) + n;
-      else if (entryMetric === "reasoning_tokens" || entryMetric === "output_reasoning_tokens") reasoningTokens = (reasoningTokens ?? 0) + n;
-    }
-  }
-  if (promptTokens === undefined && completionTokens === undefined) return null;
-  return { kind: "usage", promptTokens, completionTokens, totalTokens: (promptTokens ?? 0) + (completionTokens ?? 0), cachedInputTokens, cacheCreationInputTokens, reasoningTokens };
+	for (const f of iterFields(buf)) {
+		if (f.num !== 2 || f.wire !== 2 || !Buffer.isBuffer(f.value)) continue;
+		let entryMetric: string | undefined;
+		let entryValue: number | undefined;
+		for (const sf of iterFields(f.value as Buffer)) {
+			if (sf.num === 5 && sf.wire === 2 && Buffer.isBuffer(sf.value)) {
+				entryMetric = (sf.value as Buffer).toString("utf8");
+			} else if (sf.num === 4 && sf.wire === 2 && Buffer.isBuffer(sf.value)) {
+				for (const ssf of iterFields(sf.value as Buffer)) {
+					if (ssf.num === 2 && ssf.wire === 5 && Buffer.isBuffer(ssf.value)) {
+						entryValue = (ssf.value as Buffer).readFloatLE(0);
+						break;
+					}
+				}
+			}
+		}
+		if (
+			entryMetric &&
+			entryValue !== undefined &&
+			Number.isFinite(entryValue)
+		) {
+			const n = Math.round(entryValue);
+			if (entryMetric === "input_tokens") promptTokens = n;
+			else if (entryMetric === "output_tokens") completionTokens = n;
+			else if (
+				entryMetric === "cached_input_tokens" ||
+				entryMetric === "cache_read_input_tokens"
+			)
+				cachedInputTokens = (cachedInputTokens ?? 0) + n;
+			else if (entryMetric === "cache_creation_input_tokens")
+				cacheCreationInputTokens = (cacheCreationInputTokens ?? 0) + n;
+			else if (
+				entryMetric === "reasoning_tokens" ||
+				entryMetric === "output_reasoning_tokens"
+			)
+				reasoningTokens = (reasoningTokens ?? 0) + n;
+		}
+	}
+	if (promptTokens === undefined && completionTokens === undefined) return null;
+	return {
+		kind: "usage",
+		promptTokens,
+		completionTokens,
+		totalTokens: (promptTokens ?? 0) + (completionTokens ?? 0),
+		cachedInputTokens,
+		cacheCreationInputTokens,
+		reasoningTokens,
+	};
 }
 
 // ----------------------------------------------------------------------------
@@ -454,159 +661,249 @@ function decodeUsageBlock(buf: Buffer): CloudChatEvent | null {
 
 const TRACE_ID_RE = /\(trace ID: ([0-9a-f]+)\)/i;
 
-export async function* streamChatEvents(req: CloudChatRequest): AsyncGenerator<CloudChatEvent> {
-  const host = (req.apiServerUrl ?? "https://server.self-serve.windsurf.com").replace(/\/$/, "");
-  const userJwt = await getCachedUserJwt(req.apiKey, host, req.signal);
-  const sessionIds = getOrAllocateSessionIds(req.apiKey, host, req.cascadeId);
+export async function* streamChatEvents(
+	req: CloudChatRequest,
+): AsyncGenerator<CloudChatEvent> {
+	const host = (
+		req.apiServerUrl ?? "https://server.self-serve.windsurf.com"
+	).replace(/\/$/, "");
+	const userJwt = await getCachedUserJwt(req.apiKey, host, req.signal);
+	const sessionIds = getOrAllocateSessionIds(req.apiKey, host, req.cascadeId);
 
-  // Resolve model router to concrete model + assignment_jwt
-  const { modelUid: resolvedUid, assignmentJwt } = await resolveModel(
-    req.apiKey, host, req.modelUid, req.isModelRouter ?? false, req.signal,
-  );
+	// Resolve model router to concrete model + assignment_jwt
+	const { modelUid: resolvedUid, assignmentJwt } = await resolveModel(
+		req.apiKey,
+		host,
+		req.modelUid,
+		req.isModelRouter ?? false,
+		req.signal,
+	);
 
-  const proto = buildGetChatMessageRequest({
-    apiKey: req.apiKey, userJwt, assignmentJwt, modelUid: resolvedUid, messages: req.messages,
-    tools: req.tools, cascadeId: sessionIds.cascadeId, promptId: crypto.randomUUID(),
-    sessionId: sessionIds.sessionId, requestId: BigInt(Date.now()), triggerId: crypto.randomUUID(),
-    requestType: req.requestType, completionOpts: req.completionOpts,
-    inferenceConfig: req.inferenceConfig,
-  });
-  const body = frameConnectStream(proto, true);
+	// Claude-family models have stricter upstream limits: tool descriptions
+	// capped to ~500 chars (vs 6998 for gpt/swe) and a non-empty system prompt
+	// required when tools are present. Detect by model UID — covers both
+	// string UIDs (claude-*) and legacy enum names (MODEL_CLAUDE_*, MODEL_PRIVATE_*).
+	const isClaudeFamily = /claude/i.test(resolvedUid);
 
-  const ttfbController = new AbortController();
-  const ttfbTimer = setTimeout(() => ttfbController.abort(new Error(`TTFB timeout (${CLOUD_STREAM_TTFB_MS}ms)`)), CLOUD_STREAM_TTFB_MS);
-  const ttfbSignal = ttfbController.signal;
-  const initialSignal: AbortSignal = req.signal ? anySignal([req.signal, ttfbSignal]) : ttfbSignal;
+	const proto = buildGetChatMessageRequest({
+		apiKey: req.apiKey,
+		userJwt,
+		assignmentJwt,
+		modelUid: resolvedUid,
+		messages: req.messages,
+		tools: req.tools,
+		cascadeId: sessionIds.cascadeId,
+		promptId: crypto.randomUUID(),
+		sessionId: sessionIds.sessionId,
+		requestId: BigInt(Date.now()),
+		triggerId: crypto.randomUUID(),
+		requestType: req.requestType,
+		completionOpts: req.completionOpts,
+		inferenceConfig: req.inferenceConfig,
+		isClaudeFamily,
+	});
+	const body = frameConnectStream(proto, true);
 
-  let resp: Response;
-  try {
-    resp = await fetch(`${host}/exa.api_server_pb.ApiServerService/GetChatMessage`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/connect+proto",
-        "Connect-Protocol-Version": "1",
-        "Connect-Content-Encoding": "gzip",
-        "Connect-Accept-Encoding": "gzip",
-      },
-      body,
-      signal: initialSignal,
-    });
-  } finally {
-    clearTimeout(ttfbTimer);
-  }
+	const ttfbController = new AbortController();
+	const ttfbTimer = setTimeout(
+		() =>
+			ttfbController.abort(
+				new Error(`TTFB timeout (${CLOUD_STREAM_TTFB_MS}ms)`),
+			),
+		CLOUD_STREAM_TTFB_MS,
+	);
+	const ttfbSignal = ttfbController.signal;
+	const initialSignal: AbortSignal = req.signal
+		? anySignal([req.signal, ttfbSignal])
+		: ttfbSignal;
 
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new CloudChatError(`GetChatMessage HTTP ${resp.status}: ${truncateHeadTail(text, 600, " …(truncated)… ")}`);
-  }
-  if (!resp.body) throw new CloudChatError("GetChatMessage response had no body stream");
+	let resp: Response;
+	try {
+		resp = await fetch(
+			`${host}/exa.api_server_pb.ApiServerService/GetChatMessage`,
+			{
+				method: "POST",
+				headers: {
+					"Content-Type": "application/connect+proto",
+					"Connect-Protocol-Version": "1",
+					"Connect-Content-Encoding": "gzip",
+					"Connect-Accept-Encoding": "gzip",
+				},
+				body,
+				signal: initialSignal,
+			},
+		);
+	} finally {
+		clearTimeout(ttfbTimer);
+	}
 
-  const chunkQueue: Buffer[] = [];
-  let queuedBytes = 0;
-  const reader = resp.body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
-  let trailerError: { code?: string; message: string; traceId?: string } | null = null;
-  let sawEos = false;
+	if (!resp.ok) {
+		const text = await resp.text();
+		throw new CloudChatError(
+			`GetChatMessage HTTP ${resp.status}: ${truncateHeadTail(text, 600, " …(truncated)… ")}`,
+		);
+	}
+	if (!resp.body)
+		throw new CloudChatError("GetChatMessage response had no body stream");
 
-  function peek(n: number): Buffer | null {
-    if (queuedBytes < n) return null;
-    if (chunkQueue.length === 1 && chunkQueue[0].length >= n) return chunkQueue[0].slice(0, n);
-    const parts: Buffer[] = [];
-    let remaining = n;
-    for (const c of chunkQueue) {
-      if (remaining <= 0) break;
-      if (c.length <= remaining) { parts.push(c); remaining -= c.length; }
-      else { parts.push(c.slice(0, remaining)); remaining = 0; }
-    }
-    return Buffer.concat(parts, n);
-  }
+	const chunkQueue: Buffer[] = [];
+	let queuedBytes = 0;
+	const reader =
+		resp.body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+	let trailerError: {
+		code?: string;
+		message: string;
+		traceId?: string;
+	} | null = null;
+	let sawEos = false;
 
-  function drop(n: number): void {
-    queuedBytes -= n;
-    let remaining = n;
-    while (remaining > 0 && chunkQueue.length > 0) {
-      const head = chunkQueue[0];
-      if (head.length <= remaining) { chunkQueue.shift(); remaining -= head.length; }
-      else { chunkQueue[0] = head.slice(remaining); remaining = 0; }
-    }
-  }
+	function peek(n: number): Buffer | null {
+		if (queuedBytes < n) return null;
+		if (chunkQueue.length === 1 && chunkQueue[0].length >= n)
+			return chunkQueue[0].slice(0, n);
+		const parts: Buffer[] = [];
+		let remaining = n;
+		for (const c of chunkQueue) {
+			if (remaining <= 0) break;
+			if (c.length <= remaining) {
+				parts.push(c);
+				remaining -= c.length;
+			} else {
+				parts.push(c.slice(0, remaining));
+				remaining = 0;
+			}
+		}
+		return Buffer.concat(parts, n);
+	}
 
-  let idleTimer: ReturnType<typeof setTimeout> | null = null;
-  try {
-    const resetIdle = (): Promise<{ value?: Uint8Array; done: boolean }> => {
-      if (idleTimer) clearTimeout(idleTimer);
-      return new Promise((resolve, reject) => {
-        let settled = false;
-        const settle = (fn: () => void): void => { if (settled) return; settled = true; fn(); };
-        const timer = setTimeout(
-          () => settle(() => reject(new Error(`Idle timeout (${CLOUD_STREAM_IDLE_MS}ms)`))),
-          CLOUD_STREAM_IDLE_MS,
-        );
-        reader.read().then(
-          v => { clearTimeout(timer); settle(() => resolve(v)); },
-          e => { clearTimeout(timer); settle(() => reject(e)); },
-        );
-      });
-    };
+	function drop(n: number): void {
+		queuedBytes -= n;
+		let remaining = n;
+		while (remaining > 0 && chunkQueue.length > 0) {
+			const head = chunkQueue[0];
+			if (head.length <= remaining) {
+				chunkQueue.shift();
+				remaining -= head.length;
+			} else {
+				chunkQueue[0] = head.slice(remaining);
+				remaining = 0;
+			}
+		}
+	}
 
-    while (true) {
-      const { value, done } = await resetIdle();
-      if (done) break;
-      if (value) { chunkQueue.push(Buffer.from(value)); queuedBytes += value.length; }
+	const idleTimer: ReturnType<typeof setTimeout> | null = null;
+	try {
+		const resetIdle = (): Promise<{ value?: Uint8Array; done: boolean }> => {
+			if (idleTimer) clearTimeout(idleTimer);
+			return new Promise((resolve, reject) => {
+				let settled = false;
+				const settle = (fn: () => void): void => {
+					if (settled) return;
+					settled = true;
+					fn();
+				};
+				const timer = setTimeout(
+					() =>
+						settle(() =>
+							reject(new Error(`Idle timeout (${CLOUD_STREAM_IDLE_MS}ms)`)),
+						),
+					CLOUD_STREAM_IDLE_MS,
+				);
+				reader.read().then(
+					(v) => {
+						clearTimeout(timer);
+						settle(() => resolve(v));
+					},
+					(e) => {
+						clearTimeout(timer);
+						settle(() => reject(e));
+					},
+				);
+			});
+		};
 
-      while (queuedBytes >= 5) {
-        const header = peek(5);
-        if (!header) break;
-        const flags = header[0];
-        const len = header.readUInt32BE(1);
-        if (queuedBytes < 5 + len) break;
-        drop(5);
-        const raw = peek(len) ?? Buffer.alloc(0);
-        drop(len);
+		while (true) {
+			const { value, done } = await resetIdle();
+			if (done) break;
+			if (value) {
+				chunkQueue.push(Buffer.from(value));
+				queuedBytes += value.length;
+			}
 
-        let payload = raw;
-        if (flags & 0x01) {
-          try { payload = zlib.gunzipSync(raw); }
-          catch (gzipErr) { throw new CloudChatError(`Connect frame gunzip failed: ${(gzipErr as Error).message}`); }
-        }
-        const eos = (flags & 0x02) !== 0;
+			while (queuedBytes >= 5) {
+				const header = peek(5);
+				if (!header) break;
+				const flags = header[0];
+				const len = header.readUInt32BE(1);
+				if (queuedBytes < 5 + len) break;
+				drop(5);
+				const raw = peek(len) ?? Buffer.alloc(0);
+				drop(len);
 
-        if (eos) {
-          sawEos = true;
-          const text = payload.toString("utf8");
-          if (text && text.includes('"error"')) {
-            let code: string | undefined;
-            let message = text;
-            try {
-              const j = JSON.parse(text) as { error?: { code?: string; message?: string } };
-              code = j.error?.code;
-              if (j.error?.message) message = j.error.message;
-            } catch {}
-            const traceMatch = message.match(TRACE_ID_RE);
-            trailerError = { code, message, traceId: traceMatch?.[1] };
-          }
-          continue;
-        }
-        yield* decodeChatFrame(payload);
-      }
-    }
-  } finally {
-    if (idleTimer) clearTimeout(idleTimer);
-    try { reader.releaseLock(); } catch {}
-    try { void resp.body?.cancel(); } catch {}
-  }
+				let payload = raw;
+				if (flags & 0x01) {
+					try {
+						payload = zlib.gunzipSync(raw);
+					} catch (gzipErr) {
+						throw new CloudChatError(
+							`Connect frame gunzip failed: ${(gzipErr as Error).message}`,
+						);
+					}
+				}
+				const eos = (flags & 0x02) !== 0;
 
-  if (trailerError) {
-    const isOpaquePermissionDenial =
-      trailerError.code === "permission_denied" && /an internal error occurred/i.test(trailerError.message);
-    if (isOpaquePermissionDenial) {
-      throw new CloudChatError(
-        `Cognition denied this request for model "${req.modelUid}". This almost always means the model is not enabled for your account/tier. (trace ID: ${trailerError.traceId ?? "n/a"})`,
-        trailerError.code, trailerError.traceId,
-      );
-    }
-    throw new CloudChatError(trailerError.message, trailerError.code, trailerError.traceId);
-  }
-  if (!sawEos) {
-    throw new CloudChatError(`Cloud stream ended without EOS trailer (${queuedBytes} bytes orphaned).`, "truncated_stream");
-  }
+				if (eos) {
+					sawEos = true;
+					const text = payload.toString("utf8");
+					if (text && text.includes('"error"')) {
+						let code: string | undefined;
+						let message = text;
+						try {
+							const j = JSON.parse(text) as {
+								error?: { code?: string; message?: string };
+							};
+							code = j.error?.code;
+							if (j.error?.message) message = j.error.message;
+						} catch {}
+						const traceMatch = message.match(TRACE_ID_RE);
+						trailerError = { code, message, traceId: traceMatch?.[1] };
+					}
+					continue;
+				}
+				yield* decodeChatFrame(payload);
+			}
+		}
+	} finally {
+		if (idleTimer) clearTimeout(idleTimer);
+		try {
+			reader.releaseLock();
+		} catch {}
+		try {
+			void resp.body?.cancel();
+		} catch {}
+	}
+
+	if (trailerError) {
+		const isOpaquePermissionDenial =
+			trailerError.code === "permission_denied" &&
+			/an internal error occurred/i.test(trailerError.message);
+		if (isOpaquePermissionDenial) {
+			throw new CloudChatError(
+				`Cognition denied this request for model "${req.modelUid}". This almost always means the model is not enabled for your account/tier. (trace ID: ${trailerError.traceId ?? "n/a"})`,
+				trailerError.code,
+				trailerError.traceId,
+			);
+		}
+		throw new CloudChatError(
+			trailerError.message,
+			trailerError.code,
+			trailerError.traceId,
+		);
+	}
+	if (!sawEos) {
+		throw new CloudChatError(
+			`Cloud stream ended without EOS trailer (${queuedBytes} bytes orphaned).`,
+			"truncated_stream",
+		);
+	}
 }
