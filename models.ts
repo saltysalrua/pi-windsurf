@@ -1,109 +1,14 @@
 /**
- * Model resolution with catalog fallbacks + known alias map from WindsurfAPI.
+ * Minimal model resolution — catalog is the single source of truth.
+ *
+ * This file only exists because the proxy needs synchronous model resolution.
+ * All model metadata, UIDs, pricing, promos come from the catalog.
  */
 
 export interface ResolvedModel {
   modelId: string;
   modelUid: string;
   variant?: string;
-}
-
-/**
- * Known OpenAI-ish aliases → upstream model selector (modelUid). The catalog is
- * still the source of truth, but when a client uses a shorthand or common alias
- * that the catalog doesn't directly expose, we resolve it here.
- */
-const SELECTOR_MAP: Record<string, string> = {
-  // SWE / Cognition
-  "swe-1-6-slow": "swe-1-6-slow",
-  "swe-1.6-slow": "swe-1-6-slow",
-  "swe-1-6": "swe-1-6",
-  "swe-1.6": "swe-1-6",
-  "swe-1-6-fast": "swe-1-6-fast",
-  "swe-1.6-fast": "swe-1-6-fast",
-  "swe-1-5": "MODEL_SWE_1_5_SLOW",
-  "swe-1.5": "MODEL_SWE_1_5_SLOW",
-  "swe-1-5-fast": "MODEL_SWE_1_5",
-  "swe-1.5-fast": "MODEL_SWE_1_5",
-  "subagent-default": "subagent-default",
-
-  // Anthropic
-  "claude-opus-4-8": "claude-opus-4-8-medium",
-  "claude-opus-4.8": "claude-opus-4-8-medium",
-  "claude-opus-4-8-medium": "claude-opus-4-8-medium",
-  "opus-4-8": "claude-opus-4-8-medium",
-  "opus-4.8": "claude-opus-4-8-medium",
-  "claude-sonnet-4.6": "claude-sonnet-4-6-thinking",
-  "claude-sonnet-4-6-thinking": "claude-sonnet-4-6-thinking",
-  "claude-opus-4-5": "MODEL_CLAUDE_4_5_OPUS",
-  "claude-opus-4.5": "MODEL_CLAUDE_4_5_OPUS",
-  "claude-opus-4-5-thinking": "MODEL_CLAUDE_4_5_OPUS_THINKING",
-  "claude-sonnet-4-5": "MODEL_PRIVATE_2",
-  "claude-sonnet-4.5": "MODEL_PRIVATE_2",
-  "claude-sonnet-4-5-thinking": "MODEL_PRIVATE_3",
-  "claude-haiku-4-5": "MODEL_PRIVATE_11",
-  "claude-haiku-4.5": "MODEL_PRIVATE_11",
-
-  // OpenAI
-  "gpt-5-5": "gpt-5-5-low",
-  "gpt-5.5": "gpt-5-5-low",
-  "gpt-5-5-low": "gpt-5-5-low",
-  "gpt-5.5-low": "gpt-5-5-low",
-  "gpt-5-2": "MODEL_GPT_5_2_NONE",
-  "gpt-5.2": "MODEL_GPT_5_2_NONE",
-  "gpt-5-2-low": "MODEL_GPT_5_2_LOW",
-  "gpt-5-2-medium": "MODEL_GPT_5_2_MEDIUM",
-  "gpt-5-2-high": "MODEL_GPT_5_2_HIGH",
-  "gpt-5-2-xhigh": "MODEL_GPT_5_2_XHIGH",
-
-  // Google
-  "gemini-3-0-flash": "MODEL_GOOGLE_GEMINI_3_0_FLASH_MEDIUM",
-  "gemini-3.0-flash": "MODEL_GOOGLE_GEMINI_3_0_FLASH_MEDIUM",
-  "gemini-3-flash": "MODEL_GOOGLE_GEMINI_3_0_FLASH_MEDIUM",
-  "gemini-3-flash-minimal": "MODEL_GOOGLE_GEMINI_3_0_FLASH_MINIMAL",
-  "gemini-3-flash-low": "MODEL_GOOGLE_GEMINI_3_0_FLASH_LOW",
-  "gemini-3-flash-medium": "MODEL_GOOGLE_GEMINI_3_0_FLASH_MEDIUM",
-  "gemini-3-flash-high": "MODEL_GOOGLE_GEMINI_3_0_FLASH_HIGH",
-
-  // Others
-  "glm-5-2": "glm-5-2",
-  "glm-5.2": "glm-5-2",
-  "kimi-k2-7": "kimi-k2-7",
-
-  // Additional paid aliases confirmed live
-  "claude-5-fable": "claude-5-fable-medium",
-  "claude-sonnet-5": "claude-sonnet-5-medium",
-  "claude-opus-4-7": "claude-opus-4-7-medium",
-  "claude-opus-4.7": "claude-opus-4-7-medium",
-  "claude-opus-4.6": "claude-opus-4-6",
-  "gpt-5-4": "gpt-5-4-medium",
-  "gpt-5.4": "gpt-5-4-medium",
-  "gpt-5-4-mini": "gpt-5-4-mini-medium",
-  "gpt-5.4-mini": "gpt-5-4-mini-medium",
-  "gpt-5-3-codex": "gpt-5-3-codex-medium",
-  "gpt-5.3-codex": "gpt-5-3-codex-medium",
-  "gemini-3-5-flash": "gemini-3-5-flash-medium",
-  "gemini-3.5-flash": "gemini-3-5-flash-medium",
-  "gemini-3-1-pro": "gemini-3-1-pro-low",
-  "gemini-3.1-pro": "gemini-3-1-pro-low",
-  "glm-5.1": "glm-5-2",
-  "kimi-k2.6": "kimi-k2-6",
-  "kimi-k2.7": "kimi-k2-7",
-  "swe-1-7": "swe-1-7",
-  "swe-1.7": "swe-1-7",
-  "swe-1-7-lightning": "swe-1-7-lightning",
-  "swe-1.7-lightning": "swe-1-7-lightning",
-  "deepseek-v4": "deepseek-v4",
-};
-
-function resolveAlias(modelName: string): string | undefined {
-  const raw = String(modelName || "").trim();
-  if (!raw) return undefined;
-  const lower = raw.toLowerCase().replace(/^[a-z]+\//, "");
-  if (SELECTOR_MAP[lower]) return SELECTOR_MAP[lower];
-  const norm = lower.replace(/\./g, "-");
-  if (SELECTOR_MAP[norm]) return SELECTOR_MAP[norm];
-  return undefined;
 }
 
 /**
@@ -117,17 +22,15 @@ export async function resolveModelName(
   host?: string,
   thinkingLevel?: string,
 ): Promise<ResolvedModel> {
-  if (!apiKey || !host) return { modelId: modelName, modelUid: resolveAlias(modelName) ?? modelName };
+  if (!apiKey || !host) return { modelId: modelName, modelUid: modelName };
   try {
     const { getCachedCatalog } = await import("./catalog");
     const catalog = await getCachedCatalog(apiKey, host);
-    if (!catalog) return { modelId: modelName, modelUid: resolveAlias(modelName) ?? modelName };
+    if (!catalog) return { modelId: modelName, modelUid: modelName };
 
     const match = findCatalogEntry(catalog, modelName);
     if (!match) {
-      // Try WindsurfAPI alias map first, then family prefix search.
-      const alias = resolveAlias(modelName);
-      if (alias) return { modelId: modelName, modelUid: alias };
+      // Model name might be a family prefix (e.g. "gpt-5-4" → find "gpt-5-4-high")
       const fallback = findFamilyEntry(catalog, modelName, thinkingLevel);
       if (fallback) return { modelId: modelName, modelUid: fallback.uid, variant: fallback.label };
       return { modelId: modelName, modelUid: modelName };
@@ -143,8 +46,8 @@ export async function resolveModelName(
     }
 
     return { modelId: modelName, modelUid: match.uid, variant: match.label };
-  } catch { /* catalog unavailable or broken — fall back to alias/passthrough */ }
-  return { modelId: modelName, modelUid: resolveAlias(modelName) ?? modelName };
+  } catch {}
+  return { modelId: modelName, modelUid: modelName };
 }
 
 /** Map Pi thinking level string to a label-searchable word. */

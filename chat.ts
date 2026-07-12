@@ -14,7 +14,6 @@ import {
 import { buildMetadata } from "./metadata";
 import { getCachedUserJwt } from "./auth";
 import { resolveModel, clearAssignmentCache } from "./assign";
-import { normalizeImagePart } from "./image";
 import type { InferenceConfig } from "./catalog";
 
 // ----------------------------------------------------------------------------
@@ -125,7 +124,7 @@ export function clearSessionIds(): void { sessionCache.clear(); clearAssignmentC
 // Content normalization
 // ----------------------------------------------------------------------------
 
-async function normalizeContent(content: string | ContentPart[] | unknown): Promise<ContentPart[]> {
+function normalizeContent(content: string | ContentPart[] | unknown): ContentPart[] {
   if (typeof content === "string") return [{ type: "text", text: content }];
   if (!Array.isArray(content)) return [];
   const out: ContentPart[] = [];
@@ -135,25 +134,13 @@ async function normalizeContent(content: string | ContentPart[] | unknown): Prom
     if (p.type === "text" && typeof p.text === "string") {
       out.push({ type: "text", text: p.text });
     } else if (p.type === "image" && typeof p.base64Data === "string") {
-      const normalized = await normalizeImagePart({
-        type: "image",
-        mimeType: (typeof p.mimeType === "string" ? p.mimeType : "image/png"),
-        base64Data: p.base64Data,
-        caption: typeof p.caption === "string" ? p.caption : undefined,
-      });
-      if (normalized) out.push(normalized);
+      out.push({ type: "image", mimeType: (typeof p.mimeType === "string" ? p.mimeType : "image/png"), base64Data: p.base64Data, caption: typeof p.caption === "string" ? p.caption : undefined });
     } else if (p.type === "image_url" && p.image_url) {
       const imgRef = p.image_url as string | { url?: string };
       const url: string = typeof imgRef === "string" ? imgRef : (imgRef.url ?? "");
       const m = url.match(/^data:([^;]+);base64,(.+)$/);
-      if (m) {
-        const normalized = await normalizeImagePart({
-          type: "image",
-          mimeType: m[1],
-          base64Data: m[2],
-        });
-        if (normalized) out.push(normalized);
-      } else if (url) out.push({ type: "text", text: `[image url: ${url}]` });
+      if (m) out.push({ type: "image", mimeType: m[1], base64Data: m[2] });
+      else if (url) out.push({ type: "text", text: `[image url: ${url}]` });
     }
   }
   return out;
@@ -165,13 +152,13 @@ async function normalizeContent(content: string | ContentPart[] | unknown): Prom
  * separate system role. But they are NOT merged into user content.
  * Returns the separated messages and the total token estimate of system prefix.
  */
-async function separateSystemMessages(messages: ChatHistoryItem[]): Promise<{ messages: ChatHistoryItem[]; systemPrefixLen: number }> {
+function separateSystemMessages(messages: ChatHistoryItem[]): { messages: ChatHistoryItem[]; systemPrefixLen: number } {
   const systemTexts: string[] = [];
   const conversation: ChatHistoryItem[] = [];
 
   for (const m of messages) {
     if (m.role === "system") {
-      const parts = await normalizeContent(m.content);
+      const parts = normalizeContent(m.content);
       const text = parts.filter((p): p is { type: "text"; text: string } => p.type === "text").map(p => p.text).join("\n");
       if (text) systemTexts.push(text);
     } else {
@@ -320,19 +307,19 @@ interface BuildArgs {
   systemPrefixLen?: number;
 }
 
-async function buildGetChatMessageRequest(args: BuildArgs): Promise<Buffer> {
+function buildGetChatMessageRequest(args: BuildArgs): Buffer {
   const metadata = buildMetadata({
     apiKey: args.apiKey, userJwt: args.userJwt, assignmentJwt: args.assignmentJwt,
     sessionId: args.sessionId, requestId: args.requestId, triggerId: args.triggerId,
   });
-  const { messages: separated, systemPrefixLen } = await separateSystemMessages(args.messages);
-  const promptParts = await Promise.all(separated.map(async (m) =>
+  const { messages: separated, systemPrefixLen } = separateSystemMessages(args.messages);
+  const promptParts = separated.map((m) =>
     encodeMessage(3, encodeChatMessagePrompt(
-      await normalizeContent(m.content),
+      normalizeContent(m.content),
       SOURCE_BY_ROLE[m.role] ?? 1,
       { toolCallId: m.role === "tool" ? m.tool_call_id : undefined, toolCalls: m.role === "assistant" ? m.tool_calls : undefined },
     )),
-  ));
+  );
   const completion = encodeCompletionConfiguration(args.completionOpts ?? {}, args.inferenceConfig);
   const toolParts: Buffer[] = (args.tools ?? []).map((t) => encodeMessage(10, encodeToolDef(t)));
   return Buffer.concat([
@@ -477,7 +464,7 @@ export async function* streamChatEvents(req: CloudChatRequest): AsyncGenerator<C
     req.apiKey, host, req.modelUid, req.isModelRouter ?? false, req.signal,
   );
 
-  const proto = await buildGetChatMessageRequest({
+  const proto = buildGetChatMessageRequest({
     apiKey: req.apiKey, userJwt, assignmentJwt, modelUid: resolvedUid, messages: req.messages,
     tools: req.tools, cascadeId: sessionIds.cascadeId, promptId: crypto.randomUUID(),
     sessionId: sessionIds.sessionId, requestId: BigInt(Date.now()), triggerId: crypto.randomUUID(),
@@ -501,7 +488,7 @@ export async function* streamChatEvents(req: CloudChatRequest): AsyncGenerator<C
         "Connect-Content-Encoding": "gzip",
         "Connect-Accept-Encoding": "gzip",
       },
-      body: body as unknown as BodyInit,
+      body,
       signal: initialSignal,
     });
   } finally {
@@ -543,7 +530,7 @@ export async function* streamChatEvents(req: CloudChatRequest): AsyncGenerator<C
     }
   }
 
-  const idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
   try {
     const resetIdle = (): Promise<{ value?: Uint8Array; done: boolean }> => {
       if (idleTimer) clearTimeout(idleTimer);
@@ -593,7 +580,7 @@ export async function* streamChatEvents(req: CloudChatRequest): AsyncGenerator<C
               const j = JSON.parse(text) as { error?: { code?: string; message?: string } };
               code = j.error?.code;
               if (j.error?.message) message = j.error.message;
-            } catch { /* trailer JSON not available */ }
+            } catch {}
             const traceMatch = message.match(TRACE_ID_RE);
             trailerError = { code, message, traceId: traceMatch?.[1] };
           }
@@ -604,8 +591,8 @@ export async function* streamChatEvents(req: CloudChatRequest): AsyncGenerator<C
     }
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
-    try { reader.releaseLock(); } catch { /* reader already closed */ }
-    try { void resp.body?.cancel(); } catch { /* body already closed */ }
+    try { reader.releaseLock(); } catch {}
+    try { void resp.body?.cancel(); } catch {}
   }
 
   if (trailerError) {
