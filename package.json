@@ -25,7 +25,6 @@
   },
   "files": [
     "*.ts",
-    "vendor",
     "README.md",
     "LICENSE"
   ],
@@ -33,6 +32,6 @@
     "@earendil-works/pi-ai": "latest"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1"
+    "@types/node": "^26.0.1"
   }
 }
