@@ -714,6 +714,7 @@ async function handleRequest(
 			} else {
 				// Non-streaming response
 				let collected = "";
+				let collectedReasoning = "";
 				let finishReason: "stop" | "tool_calls" | "length" | "content_filter" =
 					"stop";
 				let usage: {
@@ -744,6 +745,7 @@ async function handleRequest(
 					signal: abort.signal,
 				})) {
 					if (ev.kind === "text") collected += ev.text;
+					else if (ev.kind === "reasoning") collectedReasoning += ev.text;
 					else if (ev.kind === "tool_call_start") {
 						currentToolCall = { id: ev.id, name: ev.name, args: "" };
 						collectedToolCalls.push(currentToolCall);
@@ -773,18 +775,20 @@ async function handleRequest(
 					);
 				}
 
-				const assistantMessage =
-					collectedToolCalls.length > 0
+				const assistantMessage = {
+					role: "assistant" as const,
+					content: collected,
+					...(collectedReasoning ? { reasoning_content: collectedReasoning } : {}),
+					...(collectedToolCalls.length > 0
 						? {
-								role: "assistant" as const,
-								content: collected,
 								tool_calls: collectedToolCalls.map((tc) => ({
 									id: tc.id,
 									type: "function" as const,
 									function: { name: tc.name, arguments: tc.args },
 								})),
 							}
-						: { role: "assistant" as const, content: collected };
+						: {}),
+				};
 
 				const responseId = `chatcmpl-${crypto.randomUUID()}`;
 				// Store metadata in side channel for extension lookup via message_end
@@ -1033,6 +1037,7 @@ async function handleRequest(
 
 					const writeSse = async (event: string, data: object): Promise<void> =>
 						writeSSE(res, `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+					let blockType: "text" | "thinking" | null = null;
 					const openTextBlock = async () => {
 						await writeSse("content_block_start", {
 							type: "content_block_start",
@@ -1040,6 +1045,16 @@ async function handleRequest(
 							content_block: { type: "text", text: "" },
 						});
 						blockOpen = true;
+						blockType = "text";
+					};
+					const openThinkingBlock = async () => {
+						await writeSse("content_block_start", {
+							type: "content_block_start",
+							index: blockIndex,
+							content_block: { type: "thinking", thinking: "" },
+						});
+						blockOpen = true;
+						blockType = "thinking";
 					};
 					const closeBlock = async () => {
 						await writeSse("content_block_stop", {
@@ -1047,6 +1062,7 @@ async function handleRequest(
 							index: blockIndex,
 						});
 						blockOpen = false;
+						blockType = null;
 						blockIndex++;
 					};
 
@@ -1075,18 +1091,24 @@ async function handleRequest(
 						completionOpts: { maxOutputTokens: requestedMaxTokens },
 					})) {
 						if (ev.kind === "text") {
-							if (!blockOpen) await openTextBlock();
+							if (blockType !== "text") {
+								if (blockOpen) await closeBlock();
+								await openTextBlock();
+							}
 							await writeSse("content_block_delta", {
 								type: "content_block_delta",
 								index: blockIndex,
 								delta: { type: "text_delta", text: ev.text },
 							});
 						} else if (ev.kind === "reasoning") {
-							if (!blockOpen) await openTextBlock();
+							if (blockType !== "thinking") {
+								if (blockOpen) await closeBlock();
+								await openThinkingBlock();
+							}
 							await writeSse("content_block_delta", {
 								type: "content_block_delta",
 								index: blockIndex,
-								delta: { type: "text_delta", text: ev.text },
+								delta: { type: "thinking_delta", thinking: ev.text },
 							});
 						} else if (ev.kind === "tool_call_start") {
 							if (blockOpen) await closeBlock();
@@ -1162,6 +1184,7 @@ async function handleRequest(
 			} else {
 				// Non-streaming
 				let collected = "";
+				let collectedThinking = "";
 				let finishReason: string | null = null;
 				let inputTokens = 0;
 				let outputTokens = 0;
@@ -1188,6 +1211,7 @@ async function handleRequest(
 					signal: abort.signal,
 				})) {
 					if (ev.kind === "text") collected += ev.text;
+					else if (ev.kind === "reasoning") collectedThinking += ev.text;
 					else if (ev.kind === "tool_call_start") {
 						currentToolCall = { id: ev.id, name: ev.name, args: "" };
 						collectedToolCalls.push(currentToolCall);
@@ -1203,6 +1227,10 @@ async function handleRequest(
 				}
 
 				const contentBlocks: Array<Record<string, unknown>> = [];
+				// Thinking block comes first (matches Anthropic API ordering)
+				if (collectedThinking) {
+					contentBlocks.push({ type: "thinking", thinking: collectedThinking });
+				}
 				// L4: head+tail compaction for oversized non-streaming responses.
 				if (collected) {
 					if (collected.length > L4_MAX_RESPONSE_CHARS) {

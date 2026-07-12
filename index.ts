@@ -775,9 +775,13 @@ export default async function (pi: ExtensionAPI) {
 	) {
 		const promoInfo = await checkFreePromo(modelId, thinkingLevel);
 		if (promoInfo?.free)
-			ctx.ui.setWidget("windsurf-promo", [ctx.ui.theme.fg("success", "◇ Free")]);
+			ctx.ui.setWidget("windsurf-promo", [
+				ctx.ui.theme.fg("success", "◇ Free"),
+			]);
 		else if (promoInfo?.promo)
-			ctx.ui.setWidget("windsurf-promo", [ctx.ui.theme.fg("warning", "✦ Promo")]);
+			ctx.ui.setWidget("windsurf-promo", [
+				ctx.ui.theme.fg("warning", "✦ Promo"),
+			]);
 		else ctx.ui.setWidget("windsurf-promo", undefined);
 	}
 
