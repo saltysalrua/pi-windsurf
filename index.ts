@@ -92,8 +92,20 @@ interface GroupedModel {
 	entries: ModelCatalogEntry[];
 }
 
-/** Strip thinking-level and fast suffixes from a UID to get the family key. */
-function stripLevelAndFast(uid: string): {
+/** Map a label-level word to a Pi ThinkingLevel. */
+const LABEL_LEVEL_WORDS: [ThinkingLevel | "off", RegExp][] = [
+	["off", /\bNo\s+Thinking\b/i],
+	["minimal", /\bMinimal\b/i],
+	["low", /\bLow\b/i],
+	["medium", /\bMedium\b/i],
+	["high", /\bHigh\b/i],
+	["xhigh", /\bXHigh\b|\bX-High\b/i],
+	["max", /\bMax\b/i],
+];
+
+/** Strip thinking-level and fast suffixes from a UID to get the family key.
+ *  If the UID has no level suffix, fall back to the display label to determine the level. */
+function stripLevelAndFast(uid: string, label?: string): {
 	familyKey: string;
 	level: ThinkingLevel | "off" | null;
 	isFast: boolean;
@@ -110,6 +122,17 @@ function stripLevelAndFast(uid: string): {
 			level = lvl;
 			work = work.replace(re, "");
 			break;
+		}
+	}
+	// Fallback: if UID had no level suffix, try to infer from the label.
+	// This handles cases like glm-5-2 (label "GLM-5.2 High") where the level
+	// is in the display name but not the UID.
+	if (level === null && label) {
+		for (const [lvl, re] of LABEL_LEVEL_WORDS) {
+			if (re.test(label)) {
+				level = lvl;
+				break;
+			}
 		}
 	}
 	return { familyKey: work, level, isFast };
@@ -139,7 +162,7 @@ function groupCatalogEntries(entries: ModelCatalogEntry[]): GroupedModel[] {
 	const groups = new Map<string, GroupedModel>();
 
 	for (const entry of entries) {
-		const { familyKey, level, isFast } = stripLevelAndFast(entry.modelUid);
+		const { familyKey, level, isFast } = stripLevelAndFast(entry.modelUid, entry.label);
 		// For entries with no level suffix (single-variant models), familyKey = uid
 		const groupKey = `${familyKey}__${isFast ? "fast" : "normal"}`;
 
@@ -692,7 +715,12 @@ export default async function (pi: ExtensionAPI) {
 			if (!catalog) return null;
 			// Resolve modelId + thinkingLevel to a specific catalog UID
 			const { resolveModelName } = await import("./models");
-			const resolved = await resolveModelName(modelId, _apiKey, _apiServerUrl, thinkingLevel);
+			const resolved = await resolveModelName(
+				modelId,
+				_apiKey,
+				_apiServerUrl,
+				thinkingLevel,
+			);
 			const entry = catalog.byUid.get(resolved.modelUid);
 			if (!entry) return null;
 			return { promo: !!entry.promoActive, free: !entry.hasPricing };
