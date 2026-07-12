@@ -13,6 +13,7 @@ import { startProxy, stopProxy, PROXY_SECRET, setProxyCredentials, getResponseMe
 import { loadCredentials, saveCredentials, deleteCredentials, loadApiFormat, saveApiFormat, DEFAULT_REGION, runLoginLoopback, registerUser, type PersistedCredentials, type WindsurfApiFormat } from "./oauth";
 import { clearCachedUserJwt } from "./auth";
 import { clearSessionIds } from "./chat";
+import { getPricingForModelUid } from "./pricing";
 import { clearCachedCatalog, getCachedCatalog, type ModelCatalogEntry, type ModelFeatures } from "./catalog";
 import { getUserStatus, clearAssignmentCache } from "./assign";
 import { windsurfEventBus } from "./event-log";
@@ -56,20 +57,24 @@ function catalogModelToPi(m: ModelCatalogEntry, familySize: number) {
   const maxOut = m.maxOutputTokens ?? 0;
   const isFree = !m.hasPricing;
   const tags: string[] = [];
-  if (isFree) tags.push("Free");
-  if (m.promoActive) tags.push(m.promoLabel || "Promo");
+  if (m.promoActive) tags.push(m.promoLabel || "Free Promo");
+  else if (isFree) tags.push("Free");
   if (m.isNew) tags.push("New");
   if (m.isModelRouter) tags.push("Router");
   const tagStr = tags.length > 0 ? ` [${tags.join(" ")}]` : "";
   const ctxStr = ctx > 0 ? ` (${ctx >= 1_000_000 ? `${Math.round(ctx / 1_000_000)}M` : `${Math.round(ctx / 1_000)}K`})` : "";
   const f = m.features;
+  // Look up per-token pricing from the hardcoded pricing table.
+  // Free-promo models still get cost populated so Pi can show API-rate cost,
+  // but the [Free Promo] tag tells users it doesn't count against quota.
+  const pricing = getPricingForModelUid(m.modelUid);
   return {
     id: m.modelUid,
     name: `${m.label}${tagStr}${ctxStr}`,
     reasoning: f?.supportsThinking ?? true,
     thinkingLevelMap: buildThinkingLevelMap(m.label, familySize),
     input: ["text", ...(f?.supportsImageCaptions !== false ? ["image"] : [])] as ("text" | "image")[],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    cost: { input: pricing.input, output: pricing.output, cacheRead: pricing.cacheRead, cacheWrite: pricing.cacheWrite },
     contextWindow: ctx || 1,
     maxTokens: maxOut || 1,
   };
