@@ -312,7 +312,16 @@ function buildGetChatMessageRequest(args: BuildArgs): Buffer {
     apiKey: args.apiKey, userJwt: args.userJwt, assignmentJwt: args.assignmentJwt,
     sessionId: args.sessionId, requestId: args.requestId, triggerId: args.triggerId,
   });
-  const { messages: separated, systemPrefixLen } = separateSystemMessages(args.messages);
+  let { messages: separated, systemPrefixLen } = separateSystemMessages(args.messages);
+  // Claude-family upstream rejects a tool-carrying request that has no system
+  // prompt with "an internal error occurred (trace ID ...)"; gpt/swe families
+  // tolerate an empty system. Inject a minimal system prompt so tool-carrying
+  // requests stay well-formed for every model family. Harmless when unneeded.
+  if (systemPrefixLen === 0 && (args.tools?.length ?? 0) > 0) {
+    const fallbackSystem = "You are a helpful assistant. Use the available tools when appropriate.";
+    separated = [{ role: "system", content: fallbackSystem }, ...separated];
+    systemPrefixLen = Math.max(1, Math.floor(fallbackSystem.length / 4));
+  }
   const promptParts = separated.map((m) =>
     encodeMessage(3, encodeChatMessagePrompt(
       normalizeContent(m.content),
