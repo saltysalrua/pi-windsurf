@@ -67,19 +67,19 @@ let _apiServerUrl = "https://server.self-serve.windsurf.com";
 
 /** Suffix patterns that encode thinking level in the UID. */
 const UID_LEVEL_SUFFIXES: [ThinkingLevel | "off", RegExp][] = [
-	["off", /-none$/],
-	["minimal", /-minimal$/],
-	["low", /-low$/],
-	["medium", /-medium$/],
-	["high", /-high$/],
-	["xhigh", /-xhigh$/],
-	["max", /-max$/],
+	["off", /[-_]none$/i],
+	["minimal", /[-_]minimal$/i],
+	["low", /[-_]low$/i],
+	["medium", /[-_]medium$/i],
+	["high", /[-_]high$/i],
+	["xhigh", /[-_]xhigh$/i],
+	["max", /[-_]max$/i],
 ];
 
 /** Fast/priority suffix — separates normal and fast into distinct Pi models. */
-const UID_FAST_SUFFIX = /-(?:fast|priority)$/;
+const UID_FAST_SUFFIX = /[-_](?:fast|priority)$/i;
 /** 1M context suffix — separates 200K and 1M context variants. */
-const UID_1M_SUFFIX = /-1m$/;
+const UID_1M_SUFFIX = /[-_]1m$/i;
 
 interface GroupedModel {
 	/** Family key (UID with level + fast + 1m suffixes stripped). */
@@ -170,15 +170,36 @@ function stripLevelFromLabel(label: string): string {
 		.trim();
 }
 
+/** Convert legacy MODEL_* enum UIDs to friendly slug-style keys.
+ *  MODEL_GPT_5_2 → gpt-5-2, MODEL_GOOGLE_GEMINI_3_0_FLASH → gemini-3-0-flash, etc.
+ *  MODEL_PRIVATE_* entries have opaque IDs — map them via label lookup.
+ *  Non-MODEL_ UIDs are returned unchanged. */
+const PRIVATE_MODEL_MAP: Record<string, string> = {
+	MODEL_PRIVATE_11: "claude-haiku-4-5",
+	MODEL_PRIVATE_2: "claude-sonnet-4-5",
+	MODEL_PRIVATE_3: "claude-sonnet-4-5",
+};
+
+function normalizeFamilyKey(key: string): string {
+	if (PRIVATE_MODEL_MAP[key]) return PRIVATE_MODEL_MAP[key];
+	if (!key.startsWith("MODEL_")) return key;
+	return key
+		.replace(/^MODEL_/, "")
+		.replace(/^GOOGLE_/, "")
+		.toLowerCase()
+		.replace(/_/g, "-");
+}
+
 /** Group catalog entries into families with thinking-level maps. */
-function groupCatalogEntries(entries: ModelCatalogEntry[]): GroupedModel[] {
+export function groupCatalogEntries(entries: ModelCatalogEntry[]): GroupedModel[] {
 	const groups = new Map<string, GroupedModel>();
 
 	for (const entry of entries) {
-		const { familyKey, level, isFast, is1M } = stripLevelAndFast(
+		const { familyKey: rawFamilyKey, level, isFast, is1M } = stripLevelAndFast(
 			entry.modelUid,
 			entry.label,
 		);
+	const familyKey = normalizeFamilyKey(rawFamilyKey);
 		// For entries with no level suffix (single-variant models), familyKey = uid
 		const groupKey = `${familyKey}__${isFast ? "fast" : "normal"}__${is1M ? "1m" : "std"}`;
 

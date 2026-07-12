@@ -778,7 +778,9 @@ async function handleRequest(
 				const assistantMessage = {
 					role: "assistant" as const,
 					content: collected,
-					...(collectedReasoning ? { reasoning_content: collectedReasoning } : {}),
+					...(collectedReasoning
+						? { reasoning_content: collectedReasoning }
+						: {}),
 					...(collectedToolCalls.length > 0
 						? {
 								tool_calls: collectedToolCalls.map((tc) => ({

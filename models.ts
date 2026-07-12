@@ -73,6 +73,24 @@ function thinkingLevelToWord(level: string): string | null {
 	return l;
 }
 
+/** Normalize a model name or UID for fuzzy matching.
+ *  MODEL_GPT_5_2_LOW → gpt-5-2-low, gpt-5-2-low → gpt-5-2-low
+ *  MODEL_PRIVATE_* entries are mapped to their friendly slug equivalents. */
+const PRIVATE_UID_MAP: Record<string, string> = {
+	MODEL_PRIVATE_11: "claude-haiku-4-5",
+	MODEL_PRIVATE_2: "claude-sonnet-4-5",
+	MODEL_PRIVATE_3: "claude-sonnet-4-5",
+};
+
+function normalizeForMatch(s: string): string {
+	if (PRIVATE_UID_MAP[s.toUpperCase()]) return PRIVATE_UID_MAP[s.toUpperCase()];
+	return s
+		.replace(/^MODEL_/, "")
+		.replace(/^GOOGLE_/, "")
+		.toLowerCase()
+		.replace(/_/g, "-");
+}
+
 /** Find a catalog entry by UID or label match. */
 function findCatalogEntry(
 	catalog: { byUid: Map<string, { modelUid: string; label: string }> },
@@ -94,12 +112,13 @@ function findCatalogEntry(
 		if (entry.label.toLowerCase() === lower)
 			return { uid: entry.modelUid, label: entry.label };
 	}
-	// Normalized match: "glm5.2" → "glm-5-2"
-	const normalized = lower.replace(/[^a-z0-9]/g, "");
+	// Normalized match: strip MODEL_ prefix and convert _ to - for legacy UIDs
+	const normalized = normalizeForMatch(lower);
 	for (const [uid, entry] of catalog.byUid) {
-		const uidNorm = uid.toLowerCase().replace(/[^a-z0-9]/g, "");
+		const uidNorm = normalizeForMatch(uid);
 		const labelNorm = entry.label.toLowerCase().replace(/[^a-z0-9]/g, "");
-		if (uidNorm === normalized || labelNorm === normalized) {
+		const inputNorm = normalized.replace(/[^a-z0-9]/g, "");
+		if (uidNorm === normalized || uidNorm.replace(/[^a-z0-9]/g, "") === inputNorm || labelNorm === inputNorm) {
 			return { uid: entry.modelUid, label: entry.label };
 		}
 	}
@@ -117,12 +136,17 @@ function findFamilyEntry(
 	thinkingLevel?: string,
 ): { uid: string; label: string } | null {
 	const lower = modelName.toLowerCase();
-	// Find all UIDs that start with the model name followed by a hyphen
+	const normalized = normalizeForMatch(lower);
+	// Find all UIDs that start with the model name (try both raw and normalized)
 	const candidates: { uid: string; label: string }[] = [];
 	for (const [uid, entry] of catalog.byUid) {
+		const uidLower = uid.toLowerCase();
+		const uidNorm = normalizeForMatch(uid);
 		if (
-			uid.toLowerCase().startsWith(lower + "-") ||
-			uid.toLowerCase().startsWith(lower)
+			uidLower.startsWith(lower + "-") ||
+			uidLower.startsWith(lower) ||
+			uidNorm.startsWith(normalized + "-") ||
+			uidNorm.startsWith(normalized)
 		) {
 			candidates.push({ uid: entry.modelUid, label: entry.label });
 		}
