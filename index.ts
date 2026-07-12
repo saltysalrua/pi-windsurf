@@ -105,7 +105,10 @@ const LABEL_LEVEL_WORDS: [ThinkingLevel | "off", RegExp][] = [
 
 /** Strip thinking-level and fast suffixes from a UID to get the family key.
  *  If the UID has no level suffix, fall back to the display label to determine the level. */
-function stripLevelAndFast(uid: string, label?: string): {
+function stripLevelAndFast(
+	uid: string,
+	label?: string,
+): {
 	familyKey: string;
 	level: ThinkingLevel | "off" | null;
 	isFast: boolean;
@@ -162,7 +165,10 @@ function groupCatalogEntries(entries: ModelCatalogEntry[]): GroupedModel[] {
 	const groups = new Map<string, GroupedModel>();
 
 	for (const entry of entries) {
-		const { familyKey, level, isFast } = stripLevelAndFast(entry.modelUid, entry.label);
+		const { familyKey, level, isFast } = stripLevelAndFast(
+			entry.modelUid,
+			entry.label,
+		);
 		// For entries with no level suffix (single-variant models), familyKey = uid
 		const groupKey = `${familyKey}__${isFast ? "fast" : "normal"}`;
 
@@ -228,16 +234,26 @@ function groupedModelToPi(group: GroupedModel) {
 	const ctx = Math.max(...group.entries.map((e) => e.contextWindow ?? 0));
 	const maxOut = Math.max(...group.entries.map((e) => e.maxOutputTokens ?? 0));
 
-	// Determine free/promo status across the group
+	// Determine free/promo status across the group.
+	// hasPricing=false means no per-token billing (truly free).
+	// promoActive=true means a promotional period (may be free or discounted);
+	//   when combined with hasPricing=true it's likely a discount, not free.
 	const allFree = group.entries.every((e) => !e.hasPricing);
-	const anyPromo = group.entries.some((e) => e.promoActive);
+	const anyFree = group.entries.some((e) => !e.hasPricing);
+	const someFree = anyFree && !allFree; // only some levels are free
 	const allPromo = group.entries.every((e) => e.promoActive);
+	const anyPromo = group.entries.some((e) => e.promoActive);
 	const somePromo = anyPromo && !allPromo; // only some levels are promo
+	// Promo but NOT free (hasPricing=true) = likely a discount, not free
+	const allPromoPaid = allPromo && !anyFree;
+	const somePromoPaid = somePromo && !anyFree;
 
 	const tags: string[] = [];
-	if (allPromo) tags.push("Free Promo");
-	else if (somePromo) tags.push("Some Free Promo");
+	if (allFree && allPromo) tags.push("Free Promo");
 	else if (allFree) tags.push("Free");
+	else if (someFree) tags.push("Some Free");
+	else if (allPromoPaid) tags.push("Promo");
+	else if (somePromoPaid) tags.push("Some Promo");
 	if (first.isNew) tags.push("New");
 	if (first.isModelRouter) tags.push("Router");
 	if (group.isFast) tags.push("Fast");
@@ -729,7 +745,9 @@ export default async function (pi: ExtensionAPI) {
 		}
 	}
 
-	// Update status bar with model + free-promo indicator
+	// Update status bar with model + free/promo indicator.
+	// hasPricing=false → truly free (no per-token billing).
+	// promoActive=true + hasPricing=true → promotional period (likely a discount, not free).
 	async function updateWindsurfStatus(
 		ctx: Parameters<Parameters<typeof _pi.on>[1]>[1],
 		modelId: string,
@@ -738,8 +756,8 @@ export default async function (pi: ExtensionAPI) {
 		const levelStr = thinkingLevel ? ` · ${thinkingLevel}` : "";
 		const promoInfo = await checkFreePromo(modelId, thinkingLevel);
 		let suffix = "";
-		if (promoInfo?.promo) suffix = " · 🆓 Free Promo";
-		else if (promoInfo?.free) suffix = " · 🆓 Free";
+		if (promoInfo?.free) suffix = " · 🆓 Free";
+		else if (promoInfo?.promo) suffix = " · 🏷️ Promo";
 		ctx.ui.setStatus("windsurf", `${modelId}${levelStr}${suffix}`);
 	}
 
