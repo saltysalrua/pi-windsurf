@@ -281,8 +281,6 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       }));
 
       const multimodalMessages: ChatHistoryItem[] = requestBody.messages.map(m => mapMessageToHistoryItem(m));
-      const requestedMaxTokens = typeof requestBody.max_tokens === "number" && requestBody.max_tokens > 0 ? requestBody.max_tokens : 128_000;
-      const isStreaming = requestBody.stream !== false;
 
       // Parallel: catalogMeta and catalogEntry are independent lookups
       const [catalogMeta, catalogEntry] = await Promise.all([
@@ -290,6 +288,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         getCachedCatalog(creds.apiKey, creds.apiServerUrl),
       ]);
       const modelCatalogEntry = catalogEntry?.byUid.get(resolved.modelUid);
+      const catalogMaxTokens = modelCatalogEntry?.maxOutputTokens && modelCatalogEntry.maxOutputTokens > 0 ? modelCatalogEntry.maxOutputTokens : 128_000;
+      const requestedMaxTokens = typeof requestBody.max_tokens === "number" && requestBody.max_tokens > 0
+        ? (modelCatalogEntry?.maxOutputTokens && modelCatalogEntry.maxOutputTokens > 0
+          ? Math.min(requestBody.max_tokens, catalogMaxTokens)
+          : requestBody.max_tokens)
+        : catalogMaxTokens;
+      const isStreaming = requestBody.stream !== false;
       const modelSupportsImages = modelCatalogEntry?.features?.supportsImageCaptions !== false;
       if (!modelSupportsImages) {
         for (const m of multimodalMessages) {
@@ -317,7 +322,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           const toolIdToIndex = new Map<string, number>();
           let lastToolCallId: string | undefined;
           let finishReason: "stop" | "tool_calls" | "length" | "content_filter" | null = null;
-          let usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number } | null = null;
+          let usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number; cachedInputTokens?: number; cacheCreationInputTokens?: number } | null = null;
           let responseMeta: ResponseMeta | null = null;
 
           for await (const ev of streamChatEvents({
@@ -359,7 +364,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
             } else if (ev.kind === "finish") {
               finishReason = ev.reason;
             } else if (ev.kind === "usage") {
-              usage = { promptTokens: ev.promptTokens, completionTokens: ev.completionTokens, totalTokens: ev.totalTokens };
+              usage = {
+                promptTokens: ev.promptTokens,
+                completionTokens: ev.completionTokens,
+                totalTokens: ev.totalTokens,
+                cachedInputTokens: ev.cachedInputTokens,
+                cacheCreationInputTokens: ev.cacheCreationInputTokens,
+              };
             } else if (ev.kind === "meta") {
               responseMeta = ev.fields;
             }
@@ -373,7 +384,17 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           await writeSSE(res, `data: ${JSON.stringify(finishChunk)}\n\n`);
 
           if (usage) {
-            const usageChunk: Record<string, unknown> = { id: responseId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: requestedModel, choices: [], usage: { prompt_tokens: usage.promptTokens ?? 0, completion_tokens: usage.completionTokens ?? 0, total_tokens: usage.totalTokens ?? 0 } };
+            const usageData: Record<string, unknown> = {
+              prompt_tokens: usage.promptTokens ?? 0,
+              completion_tokens: usage.completionTokens ?? 0,
+              total_tokens: usage.totalTokens ?? 0,
+            };
+            if (usage.cachedInputTokens !== undefined) {
+              usageData.cache_read_input_tokens = usage.cachedInputTokens;
+              usageData.prompt_tokens_details = { cached_tokens: usage.cachedInputTokens };
+            }
+            if (usage.cacheCreationInputTokens !== undefined) usageData.cache_creation_input_tokens = usage.cacheCreationInputTokens;
+            const usageChunk: Record<string, unknown> = { id: responseId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: requestedModel, choices: [], usage: usageData };
             if (responseMeta) usageChunk["_windsurf_meta"] = serializeResponseMeta(responseMeta);
             await writeSSE(res, `data: ${JSON.stringify(usageChunk)}\n\n`);
           }
@@ -393,7 +414,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         // Non-streaming response
         let collected = "";
         let finishReason: "stop" | "tool_calls" | "length" | "content_filter" = "stop";
-        let usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number } | null = null;
+        let usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number; cachedInputTokens?: number; cacheCreationInputTokens?: number } | null = null;
         let responseMeta: ResponseMeta | null = null;
         type CollectedToolCall = { id: string; name: string; args: string };
         const collectedToolCalls: CollectedToolCall[] = [];
@@ -416,7 +437,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           else if (ev.kind === "tool_call_start") { currentToolCall = { id: ev.id, name: ev.name, args: "" }; collectedToolCalls.push(currentToolCall); }
           else if (ev.kind === "tool_call_args") { if (currentToolCall) currentToolCall.args += ev.argsDelta; }
           else if (ev.kind === "finish") finishReason = ev.reason;
-          else if (ev.kind === "usage") usage = { promptTokens: ev.promptTokens, completionTokens: ev.completionTokens, totalTokens: ev.totalTokens };
+          else if (ev.kind === "usage") {
+            usage = {
+              promptTokens: ev.promptTokens,
+              completionTokens: ev.completionTokens,
+              totalTokens: ev.totalTokens,
+              cachedInputTokens: ev.cachedInputTokens,
+              cacheCreationInputTokens: ev.cacheCreationInputTokens,
+            };
+          }
           else if (ev.kind === "meta") responseMeta = ev.fields;
         }
         if (collectedToolCalls.length > 0 && finishReason === "stop") finishReason = "tool_calls";
@@ -435,13 +464,24 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         // Store metadata in side channel for extension lookup via message_end
         if (responseMeta) storeResponseMeta(responseId, responseMeta);
 
+        const openAIUsage: Record<string, unknown> = {
+          prompt_tokens: usage?.promptTokens ?? 0,
+          completion_tokens: usage?.completionTokens ?? 0,
+          total_tokens: usage?.totalTokens ?? 0,
+        };
+        if (usage?.cachedInputTokens !== undefined) {
+          openAIUsage.cache_read_input_tokens = usage.cachedInputTokens;
+          openAIUsage.prompt_tokens_details = { cached_tokens: usage.cachedInputTokens };
+        }
+        if (usage?.cacheCreationInputTokens !== undefined) openAIUsage.cache_creation_input_tokens = usage.cacheCreationInputTokens;
+
         const resp: Record<string, unknown> = {
           id: responseId,
           object: "chat.completion",
           created: Math.floor(Date.now() / 1000),
           model: requestedModel,
           choices: [{ index: 0, message: assistantMessage, finish_reason: finishReason }],
-          ...(usage ? { usage: { prompt_tokens: usage.promptTokens ?? 0, completion_tokens: usage.completionTokens ?? 0, total_tokens: usage.totalTokens ?? 0 } } : {}),
+          ...(usage ? { usage: openAIUsage } : {}),
         };
         if (responseMeta) resp["_windsurf_meta"] = serializeResponseMeta(responseMeta);
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -515,6 +555,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
       const requestedMaxTokens = typeof anthroBody.max_tokens === "number" && anthroBody.max_tokens > 0 ? anthroBody.max_tokens : catalogMaxTokens;
       const isStreaming = anthroBody.stream !== false;
+      const msgId = `msg_${crypto.randomBytes(12).toString("hex")}`;
 
       if (isStreaming) {
         res.writeHead(200, {
@@ -523,7 +564,6 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           "Connection": "keep-alive",
         });
 
-        const msgId = `msg_${crypto.randomBytes(12).toString("hex")}`;
         const abort = new AbortController();
         req.on("close", () => { if (!res.writableEnded) abort.abort(); });
 
@@ -533,6 +573,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           let finishReason: string | null = null;
           let inputTokens = 0;
           let outputTokens = 0;
+          let cachedInputTokens: number | undefined;
+          let cacheCreationInputTokens: number | undefined;
 
           const writeSse = async (event: string, data: object): Promise<void> => writeSSE(res, `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
           const openTextBlock = async () => { await writeSse("content_block_start", { type: "content_block_start", index: blockIndex, content_block: { type: "text", text: "" } }); blockOpen = true; };
@@ -579,23 +621,31 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
             } else if (ev.kind === "usage") {
               inputTokens = ev.promptTokens ?? 0;
               outputTokens = ev.completionTokens ?? 0;
+              cachedInputTokens = ev.cachedInputTokens;
+              cacheCreationInputTokens = ev.cacheCreationInputTokens;
             }
           }
 
           if (blockOpen) await closeBlock();
 
           const stopReason = finishReason === "tool_calls" ? "tool_use" : finishReason === "length" ? "max_tokens" : "end_turn";
+          const anthropicUsage: Record<string, unknown> = {
+            input_tokens: inputTokens,
+            output_tokens: outputTokens,
+          };
+          if (cachedInputTokens !== undefined) anthropicUsage.cache_read_input_tokens = cachedInputTokens;
+          if (cacheCreationInputTokens !== undefined) anthropicUsage.cache_creation_input_tokens = cacheCreationInputTokens;
           await writeSse("message_delta", {
             type: "message_delta",
             delta: { stop_reason: stopReason, stop_sequence: null },
-            usage: { output_tokens: outputTokens },
+            usage: anthropicUsage,
           });
           await writeSse("message_stop", { type: "message_stop" });
           res.end();
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : "Unknown error";
           try {
-            await writeSse("error", { type: "error", error: { type: "api_error", message: errorMessage } });
+            await writeSSE(res, `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "api_error", message: errorMessage } })}\n\n`);
             res.end();
           } catch (writeErr) { /* client disconnected */ }
         }
@@ -605,6 +655,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         let finishReason: string | null = null;
         let inputTokens = 0;
         let outputTokens = 0;
+        let cachedInputTokens: number | undefined;
+        let cacheCreationInputTokens: number | undefined;
         const collectedToolCalls: Array<{ id: string; name: string; args: string }> = [];
         let currentToolCall: { id: string; name: string; args: string } | null = null;
 
@@ -624,7 +676,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           else if (ev.kind === "tool_call_start") { currentToolCall = { id: ev.id, name: ev.name, args: "" }; collectedToolCalls.push(currentToolCall); }
           else if (ev.kind === "tool_call_args") { if (currentToolCall) currentToolCall.args += ev.argsDelta; }
           else if (ev.kind === "finish") finishReason = ev.reason;
-          else if (ev.kind === "usage") { inputTokens = ev.promptTokens ?? 0; outputTokens = ev.completionTokens ?? 0; }
+          else if (ev.kind === "usage") {
+            inputTokens = ev.promptTokens ?? 0;
+            outputTokens = ev.completionTokens ?? 0;
+            cachedInputTokens = ev.cachedInputTokens;
+            cacheCreationInputTokens = ev.cacheCreationInputTokens;
+          }
         }
 
         const contentBlocks: Array<Record<string, unknown>> = [];
@@ -641,6 +698,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           contentBlocks.push({ type: "tool_use", id: tc.id, name: tc.name, input });
         }
 
+        const anthropicUsage: Record<string, unknown> = {
+          input_tokens: inputTokens,
+          output_tokens: outputTokens,
+        };
+        if (cachedInputTokens !== undefined) anthropicUsage.cache_read_input_tokens = cachedInputTokens;
+        if (cacheCreationInputTokens !== undefined) anthropicUsage.cache_creation_input_tokens = cacheCreationInputTokens;
+
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           id: msgId,
@@ -649,7 +713,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           content: contentBlocks,
           model: requestedModel,
           stop_reason: collectedToolCalls.length > 0 ? "tool_use" : (finishReason === "length" ? "max_tokens" : "end_turn"),
-          usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+          usage: anthropicUsage,
         }));
       }
       return;
